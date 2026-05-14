@@ -693,6 +693,7 @@ textarea { resize: vertical; min-height: 80px; }
       <span id="sync-label">Sin conexión Sheets</span>
     </div>
     <div style="margin-top:6px; font-size:10px;">v3.0 · Goyavier PQRS</div>
+    <button onclick="logout()" style="margin-top:10px;width:100%;background:rgba(255,255,255,0.10);border:1px solid rgba(255,255,255,0.20);color:rgba(255,255,255,0.80);border-radius:8px;padding:7px 0;font-size:12px;cursor:pointer;">🔒 Cerrar sesión</button>
   </div>
 </aside>
 
@@ -1423,6 +1424,16 @@ async function apiFetch(action, params = {}, timeoutMs = 18000) {
   }
 }
 
+function logout() {
+  const token = _authToken;
+  _authToken = ''; _googleAccessToken = ''; _gmailAccessToken = '';
+  sessionStorage.clear();
+  if (token) {
+    fetch(APPS_SCRIPT_URL + '?action=logout&token=' + encodeURIComponent(token)).catch(()=>{});
+  }
+  renderLoginScreen();
+}
+
 function renderLoginScreen(message) {
   _authToken = ''; _googleAccessToken = ''; _gmailAccessToken = '';
   const overlay = document.getElementById('login-overlay');
@@ -1574,43 +1585,36 @@ async function _pedirTokenGmail() {
   });
 }
 
-async function sendResponseEmail(sol, seguimiento, sinEnlace = false) {
-  if(!sol?.correo) {
-    toast('Seguimiento guardado. La solicitud no tiene correo registrado — no se envió notificación.', 'warn');
-    return;
+async function sendResponseEmail(sol, seguimiento, sinEnlace = false, contexto = null) {
+  if (!sol?.correo) return null; // Sin correo, el llamador decide qué hacer
+
+  const ctx = contexto || (sinEnlace ? 'despacho' : (sol.observacionSolicitante ? 'respuestaObservacion' : 'respuesta'));
+  const gmailTok = await _pedirTokenGmail();
+  const data = await apiFetch('sendEmail', {
+    token:        _authToken,
+    googleToken:  gmailTok,
+    sinEnlace:    sinEnlace ? 'true' : 'false',
+    contexto:     ctx,
+    dependencia:  sol.dependencia  || '',
+    id:           sol.id           || '',
+    nombre:       sol.nombre       || '',
+    correo:       sol.correo       || '',
+    estudiante:   sol.estudiante   || '',
+    grado:        sol.grado        || '',
+    segFecha:     seguimiento.fecha     || '',
+    segRespuesta: seguimiento.respuesta || '',
+    segEstado:    seguimiento.estado    || ''
+  });
+
+  if (data?.error === 'TOKEN_EXPIRED') {
+    _googleAccessToken = ''; _gmailAccessToken = ''; _authToken = '';
+    renderLoginScreen('Sesión expirada. Inicie sesión nuevamente con Google.');
+    throw new Error('TOKEN_EXPIRED');
   }
-  try {
-    // Solicitar token Gmail si no se tiene aún (aparecerá popup de Google la primera vez)
-    const gmailTok = await _pedirTokenGmail();
-    const data = await apiFetch('sendEmail', {
-      token:        _authToken,
-      googleToken:  gmailTok,
-      sinEnlace:    sinEnlace ? 'true' : 'false',
-      id:           sol.id           || '',
-      nombre:       sol.nombre       || '',
-      correo:       sol.correo       || '',
-      estudiante:   sol.estudiante   || '',
-      grado:        sol.grado        || '',
-      segFecha:     seguimiento.fecha     || '',
-      segRespuesta: seguimiento.respuesta || '',
-      segEstado:    seguimiento.estado    || ''
-    });
-    if (data?.error === 'TOKEN_EXPIRED') {
-      toast('La sesión de Google expiró. Por favor inicie sesión nuevamente.', 'error');
-      _googleAccessToken = ''; _gmailAccessToken = ''; _authToken = '';
-      renderLoginScreen('Sesión expirada. Inicie sesión nuevamente con Google.');
-      return;
-    }
-    if(data?.ok) {
-      const via = data.via === 'gmail_api' ? ' (enviado desde su cuenta)' : '';
-      toast('Correo de respuesta enviado a ' + sol.correo + via + '.', 'success');
-    } else {
-      toast('Seguimiento guardado. No se pudo enviar el correo: ' + (data?.error || 'error desconocido'), 'warn');
-    }
-  } catch(e) {
-    console.warn('sendResponseEmail error:', e.message);
-    toast('Seguimiento guardado. No se pudo enviar el correo al solicitante.', 'warn');
+  if (!data?.ok) {
+    throw new Error(data?.error || 'Error desconocido al enviar el correo');
   }
+  return data; // { ok: true, to: '...', via: 'gmail_api' | 'gmailapp' }
 }
 
 function setTodayDate() {
@@ -2028,7 +2032,7 @@ function guardarSolicitud() {
     el.classList.remove('input-error');
     if(!el.value.trim()) { el.classList.add('input-error'); valid = false; }
   });
-  if(!valid) { toast('Por favor complete todos los campos obligatorios.', 'error'); return; }
+  if(!valid) { toast('Por favor completa todos los campos requeridos para continuar.', 'error'); return; }
 
   const id = getNextConsecutivo();
   const sol = {
@@ -2071,7 +2075,7 @@ function noEnviarCorreo() {
     _pendingSolicitud.emailPendiente = true;
     pushToSheets();
     updateBadge();
-    toast('Solicitud guardada. Correo agregado a pendientes.', 'warn');
+    toast('Solicitud guardada correctamente. El correo fue agregado a pendientes.', 'warn');
   }
   _cerrarModalGuardar();
 }
@@ -2111,7 +2115,7 @@ function confirmarCorreoEnviado() {
     sol.emailPendiente = false;
     pushToSheets();
     updateBadge();
-    toast('Correo confirmado. Estado cambiado a "En Proceso".', 'success');
+    toast('✅ Correo confirmado. Estado actualizado a "En Proceso".', 'success');
   }
   _cerrarModalGuardar();
 }
@@ -2122,7 +2126,7 @@ function noSeEnvioCorreo() {
     sol.emailPendiente = true;
     pushToSheets();
     updateBadge();
-    toast('Correo marcado como pendiente. Puedes enviarlo desde "Correos Pendientes".', 'warn');
+    toast('Correo guardado en pendientes. Puedes enviarlo desde "Correos Pendientes" cuando lo desees.', 'warn');
   }
   _cerrarModalGuardar();
 }
@@ -2143,9 +2147,9 @@ function buildEmailBody(sol) {
   const linkRespuesta = scriptUrl
     + '?action=responderArea&id=' + encodeURIComponent(sol.id)
     + '&area=' + encodeURIComponent(sol.dependencia || '');
-  return `Estimado(a) equipo de ${sol.dependencia},
+  return `Hola, equipo de ${sol.dependencia}.
 
-Por medio del presente correo se notifica el ingreso de una nueva solicitud PQRS para gestión del área:
+Les informamos que ha ingresado una nueva solicitud PQRS que requiere su gestión. Su respuesta oportuna es fundamental para brindar la mejor atención a nuestras familias. A continuación encontrarán los detalles:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DATOS DE LA SOLICITUD
@@ -2178,10 +2182,12 @@ Para registrar su respuesta o gestión, haga clic en el siguiente enlace:
 
 ${linkRespuesta}
 
-Este enlace es exclusivo para el área ${sol.dependencia}. Su respuesta quedará registrada directamente en el sistema PQRS.
+Este enlace es exclusivo para el área ${sol.dependencia}. Su respuesta quedará registrada directamente en nuestro sistema de gestión PQRS.
 
-Cordialmente,
-Sistema PQRS - Colegio Goyavier Campestre`;
+Recuerden que cada solicitud que gestionamos contribuye a fortalecer la confianza de nuestra comunidad educativa. ¡Gracias por su compromiso y dedicación!
+
+Con atención y agradecimiento,
+Sistema PQRS · Colegio Goyavier Campestre`;
 }
 
 function clearForm() {
@@ -2295,7 +2301,7 @@ async function enviarSolicitud(sendNow) {
   if(!sol) return;
 
   const dep = document.getElementById('dp-dependencia').value;
-  if(!dep) { toast('Debe seleccionar la dependencia responsable.', 'error'); document.getElementById('dp-dependencia').focus(); return; }
+  if(!dep) { toast('Por favor selecciona el área responsable para continuar.', 'error'); document.getElementById('dp-dependencia').focus(); return; }
 
   // Aplicar datos editados
   sol.nombre            = document.getElementById('dp-nombre').value || sol.nombre;
@@ -2325,12 +2331,12 @@ async function enviarSolicitud(sendNow) {
     window.open(gmailUrl, '_blank');
     sol.estado         = 'Proceso';
     sol.emailPendiente = false;
-    toast(`✅ Solicitud ${sol.id} enviada. Correo abierto en Gmail → Estado: Proceso.`, 'success');
+    toast(`✅ Solicitud ${sol.id} enviada al área. Correo abierto en Gmail → Estado: En Proceso.`, 'success');
   } else {
     // Dejar abierto: pasa a Abierto con correo pendiente
     sol.estado         = 'Abierto';
     sol.emailPendiente = true;
-    toast(`✅ Solicitud ${sol.id} asignada a "${dep}". Pendiente de notificación en Correos.`, 'success');
+    toast(`✅ Solicitud ${sol.id} asignada al equipo de "${dep}". La notificación está en Correos Pendientes.`, 'success');
   }
 
   // Registrar evento de despacho en la línea de tiempo
@@ -2339,8 +2345,8 @@ async function enviarSolicitud(sendNow) {
   sol.seguimientos.push({
     fecha: _ahoraDespacho.slice(0, 10),
     respuesta: sendNow
-      ? `Solicitud enviada al área "${dep}" para gestión. Se notificó al solicitante.`
-      : `Solicitud asignada al área "${dep}". Correo al área pendiente de envío.`,
+      ? `Solicitud asignada al equipo de "${dep}" para su gestión. El solicitante fue notificado oportunamente.`
+      : `Solicitud asignada al equipo de "${dep}". La notificación al área está pendiente de envío.`,
     estado: sendNow ? 'Proceso' : 'Abierto',
     registradoEn: _ahoraDespacho,
     tipo: 'despacho',
@@ -2350,12 +2356,8 @@ async function enviarSolicitud(sendNow) {
   await pushToSheets();
   // Notificar al solicitante automáticamente cuando se despacha (sin enlace de observación)
   if(sendNow && sol.correo) {
-    const seg = {
-      fecha: new Date().toISOString().slice(0,10),
-      respuesta: `Su solicitud fue recibida y derivada a la dependencia "${dep}" para su gestión. Le notificaremos cuando tengamos una respuesta.`,
-      estado: 'Proceso'
-    };
-    await sendResponseEmail(sol, seg, true);
+    const seg = { fecha: new Date().toISOString().slice(0,10), respuesta: '', estado: 'Proceso' };
+    await sendResponseEmail(sol, seg, true, 'despacho');
   }
   closeModal('modal-despacho');
   renderBandeja();
@@ -2376,7 +2378,7 @@ async function rechazarBorrador(id) {
   renderBandeja();
   renderDashboard();
   updateBadge();
-  toast('Solicitud descartada.', 'warn');
+  toast('La solicitud fue descartada.', 'warn');
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -2401,14 +2403,14 @@ async function enviarObsAreaEmail(sendNow) {
   const sol = DB.solicitudes.find(s => s.id === _obsAreaId);
   if(!sol) return;
   if(!sendNow) {
-    toast('Acción cancelada. Use el botón "Enviar correo al área ahora" para enviar la observación.', 'info');
+    toast('Acción cancelada. Puedes usar el botón "Enviar correo al área ahora" cuando desees enviar la observación.', 'info');
     closeModal('modal-obs-area');
     return;
   }
   const dep       = sol.dependencia || '';
   const emailArea = dep ? (DB.config.emailAreas?.[dep] || '') : '';
   if(!emailArea) {
-    toast(`La dependencia "${dep}" no tiene correo configurado. Configúrelo en la sección Configuración.`, 'error');
+    toast(`El área "${dep}" no tiene correo registrado. Puedes configurarlo desde la sección de Configuración.`, 'error');
     return;
   }
   const extra = (document.getElementById('oa-extra')?.value || '').trim();
@@ -2433,7 +2435,7 @@ async function enviarObsAreaEmail(sendNow) {
       return;
     }
     const via = data.via === 'gmail_api' ? ' (desde su cuenta)' : '';
-    toast(`✅ Observación enviada al área "${dep}"${via}. Esperando su respuesta en la app.`, 'success');
+    toast(`✅ Observación enviada al equipo de "${dep}"${via}. Esperamos su respuesta pronto en la app.`, 'success');
     closeModal('modal-obs-area');
   } catch(ex) {
     toast('Error de conexión al enviar la observación: ' + ex.message, 'error');
@@ -2579,20 +2581,35 @@ async function guardarSeguimiento() {
   const fecha = document.getElementById('seg-fecha').value;
   const respuesta = document.getElementById('seg-respuesta').value.trim();
   const nuevoEstado = document.getElementById('seg-estado-nuevo').value;
-  if(!fecha || !respuesta) { toast('Complete todos los campos del seguimiento.', 'error'); return; }
+  if(!fecha || !respuesta) { toast('Por favor completa todos los campos del seguimiento para continuar.', 'error'); return; }
 
   const sol = DB.solicitudes.find(s=>s.id===_currentSolicitudId);
   if(!sol) return;
 
-  // Bloquear el botón mientras procesa
   _guardandoSeguimiento = true;
   const btn = document.getElementById('btn-guardar-seg');
-  if(btn) { btn.disabled = true; btn.textContent = '⏳ Guardando...'; }
+  if(btn) { btn.disabled = true; btn.textContent = '⏳ Enviando correo...'; }
+
+  if(!sol.seguimientos) sol.seguimientos = [];
+  const ahora = new Date().toISOString();
+  const seguimiento = { fecha, respuesta, estado: nuevoEstado, registradoEn: ahora, tipo: 'secretaria', autor: 'Secretaría', segKey: ahora };
 
   try {
-    if(!sol.seguimientos) sol.seguimientos = [];
-    const ahora = new Date().toISOString();
-    const seguimiento = { fecha, respuesta, estado: nuevoEstado, registradoEn: ahora, tipo: 'secretaria', autor: 'Secretaría', segKey: ahora };
+    // 1. Enviar correo PRIMERO — si falla, el seguimiento NO se guarda en Sheets
+    let emailResult = null;
+    if (sol.correo) {
+      if(btn) btn.textContent = '⏳ Enviando correo...';
+      try {
+        emailResult = await sendResponseEmail(sol, seguimiento);
+      } catch(emailErr) {
+        if (emailErr.message === 'TOKEN_EXPIRED') return; // renderLoginScreen ya fue llamado
+        toast('❌ Error al enviar el correo: ' + emailErr.message + '. El seguimiento no fue guardado.', 'error');
+        return; // No guardar
+      }
+    }
+
+    // 2. Correo enviado (o sin dirección). Ahora sí guardar el seguimiento.
+    if(btn) btn.textContent = '⏳ Guardando...';
     sol.seguimientos.push(seguimiento);
     sol.estado = nuevoEstado;
     if (_areaSegIdx !== null && sol.seguimientos[_areaSegIdx]) {
@@ -2600,18 +2617,23 @@ async function guardarSeguimiento() {
     }
     _areaSegIdx = null;
     await pushToSheets();
-    await sendResponseEmail(sol, seguimiento);
+
     closeModal('modal-seg');
-    toast(`Seguimiento registrado. Estado: ${nuevoEstado}.`, 'success');
+    if (emailResult) {
+      const via = emailResult.via === 'gmail_api' ? ' (enviado desde su cuenta)' : '';
+      toast(`✅ Seguimiento registrado y correo enviado a ${sol.correo}${via}.`, 'success');
+    } else {
+      toast(`✅ Seguimiento registrado. Sin correo registrado, no se envió notificación.`, 'success');
+    }
     renderSeguimiento();
     renderDashboard();
     renderHistorial();
     updateBadge();
   } catch(e) {
-    // Si falla, revertir el seguimiento agregado y restaurar el botón
+    // Revertir si pushToSheets falla (el correo ya fue enviado — caso raro)
     sol.seguimientos.pop();
     sol.estado = sol.seguimientos.length ? sol.seguimientos[sol.seguimientos.length-1].estado : 'Abierto';
-    toast('Error al guardar el seguimiento. Intente de nuevo.', 'error');
+    toast('Ocurrió un error al guardar el seguimiento en el sistema. Por favor intenta de nuevo.', 'error');
   } finally {
     _guardandoSeguimiento = false;
     if(btn) { btn.disabled = false; btn.innerHTML = '💾 Guardar Seguimiento'; }
@@ -2688,14 +2710,14 @@ function confirmarEnvioRealizado() {
     renderCorreos();
     renderDashboard();
     renderSeguimiento();
-    toast(`✅ Correo de ${sol.id} marcado como enviado. Estado: Proceso.`, 'success');
+    toast(`✅ Correo de ${sol.id} marcado como enviado. Estado actualizado a: En Proceso.`, 'success');
   }
   document.getElementById('modal-confirm-envio').classList.remove('open');
   _confirmEnvioId = null;
 }
 
 function cancelarConfirmEnvio() {
-  toast('El correo permanece en pendientes. Puede enviarlo cuando desee.', 'warn');
+  toast('El correo permanece en pendientes. Puedes enviarlo en cualquier momento.', 'warn');
   document.getElementById('modal-confirm-envio').classList.remove('open');
   _confirmEnvioId = null;
 }
@@ -3054,6 +3076,16 @@ const USUARIOS_SHEET = 'UsuariosPQRS';
 // EMAIL_RESP: destinatario de notificaciones internas del sistema (no depende del usuario logueado)
 const EMAIL_RESP     = 'secretaria@colegiogoyavier.edu.co';
 
+// Escapa caracteres HTML para evitar XSS al insertar datos de Sheets en HTML generado.
+function sanitizeHtml_(str) {
+  return String(str == null ? '' : str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function onFormSubmit(e) {
   try {
     if (!e || !e.namedValues) {
@@ -3138,16 +3170,18 @@ function onFormSubmit(e) {
 }
 
 function doGet(e) {
-  _jsonpCb_ = e.parameter.callback || '';
+  const rawCb = e.parameter.callback || '';
+  _jsonpCb_ = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(rawCb) ? rawCb : '';
   try {
     const action = e.parameter.action;
     if (!action) {
       return HtmlService.createHtmlOutputFromFile('PQRS-FINAL')
         .setTitle('Sistema PQRS · Goyavier Campestre')
-        .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+        .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.SAMEORIGIN);
     }
-    if (action === 'ping')         return jsonOut('ok');
-    if (action === 'googleLogin')  return googleLogin_(e.parameter.access_token);
+    if (action === 'ping')        return jsonOut('ok');
+    if (action === 'logout')      return logout_(e.parameter.token);
+    if (action === 'googleLogin') return googleLogin_(e.parameter.access_token);
     // Rutas públicas — sin autenticación (para solicitantes externos)
     if (action === 'responder')               return serveFormRespuesta_(e.parameter);
     if (action === 'guardarRespuesta')        return guardarRespuestaSolicitante_(e.parameter);
@@ -3179,6 +3213,11 @@ function doPost(e) {
   } catch(err) {
     return jsonOut({error: err.message});
   }
+}
+
+function logout_(token) {
+  if (token) CacheService.getScriptCache().remove('pqrs_token_' + String(token));
+  return jsonOut({ok: true});
 }
 
 // Autenticación exclusiva con Google — patrón idéntico a Zaiko.
@@ -3514,28 +3553,67 @@ function syncData(solicitudes) {
 function sendEmailFromParams_(p) {
   const destinatario = String(p.correo || '').trim();
   if (!destinatario) return jsonOut({ok: false, error: 'La solicitud no tiene correo del solicitante'});
-  const sinEnlace = p.sinEnlace === 'true';
+  const sinEnlace  = p.sinEnlace === 'true';
+  const contexto   = String(p.contexto || 'respuesta');
+  const nombre     = p.nombre || 'estimado(a) solicitante';
+  const dep        = p.dependencia || 'el equipo responsable';
   const asunto = sinEnlace
-    ? '[PQRS Goyavier] Solicitud recibida · ' + p.id
-    : '[PQRS Goyavier] Respuesta a su solicitud ' + p.id;
+    ? '[Colegio Goyavier] Recibimos tu solicitud · ' + p.id
+    : contexto === 'respuestaObservacion'
+      ? '[Colegio Goyavier] Revisamos tu observación — nueva respuesta · ' + p.id
+      : '[Colegio Goyavier] Tenemos novedades sobre tu solicitud · ' + p.id;
   const enlaceRespuesta = ScriptApp.getService().getUrl() + '?action=responder&id=' + encodeURIComponent(p.id);
   const bloqueEnlace = sinEnlace ? '' :
     '──────────────────────────────────────────\\n' +
-    'Ingrese al siguiente enlace para confirmar si la respuesta fue satisfactoria,\\n' +
-    'cerrar el PQRS o registrar alguna observacion o inconformidad:\\n' +
+    'Cuéntanos cómo te fue. Haz clic en el siguiente enlace para\\n' +
+    'confirmar si tu caso fue resuelto o para registrar una observación:\\n' +
     enlaceRespuesta + '\\n' +
     '──────────────────────────────────────────\\n\\n';
-  const cuerpo =
-    'Estimado(a) ' + (p.nombre || 'solicitante') + ',\\n\\n' +
-    'Se registra respuesta/seguimiento para su solicitud PQRS.\\n\\n' +
-    'Consecutivo: ' + p.id + '\\n' +
-    'Fecha de seguimiento: ' + p.segFecha + '\\n' +
-    'Estado actual: ' + p.segEstado + '\\n' +
-    'Estudiante: ' + (p.estudiante || '-') + '\\n' +
-    'Grado: ' + (p.grado || '-') + '\\n\\n' +
-    'Respuesta:\\n' + p.segRespuesta + '\\n\\n' +
-    bloqueEnlace +
-    'Cordialmente,\\nColegio Goyavier Campestre';
+  var intro, detalle, cierre;
+  if (contexto === 'despacho') {
+    intro =
+      'Hola, ' + nombre + '. Esperamos que te encuentres muy bien.\\n\\n' +
+      'Queremos informarte que tu solicitud PQRS ya fue recibida y registrada correctamente en nuestro sistema.\\n' +
+      'La hemos asignado al equipo de ' + dep + ', que será el encargado de revisarla y darte una respuesta oportuna.\\n\\n';
+    detalle =
+      'Número de solicitud : ' + p.id + '\\n' +
+      'Fecha de asignación : ' + p.segFecha + '\\n' +
+      'Estado              : En gestión\\n' +
+      'Estudiante          : ' + (p.estudiante || '-') + '\\n' +
+      'Grado               : ' + (p.grado || '-') + '\\n\\n';
+    cierre = 'Tan pronto tengamos una respuesta para ti, te la haremos llegar a este mismo correo.\\nGracias por confiar en el Colegio Goyavier Campestre. Tu tranquilidad es lo más importante para nosotros.\\n\\n';
+  } else if (contexto === 'respuestaObservacion') {
+    intro =
+      'Hola, ' + nombre + '. Esperamos que te encuentres muy bien.\\n\\n' +
+      'Nos comunicamos contigo porque recibimos y revisamos con mucho cuidado la observación que registraste sobre tu solicitud PQRS.\\n' +
+      'Nuestro equipo de ' + dep + ' realizó un nuevo seguimiento a tu caso y ya contamos con una nueva respuesta relacionada con lo que nos comentaste.\\n\\n' +
+      'Hemos revisado nuevamente tu caso para brindarte una mejor atención. Tu opinión es muy importante para nosotros.\\n\\n';
+    detalle =
+      'Número de solicitud : ' + p.id + '\\n' +
+      'Fecha de gestión    : ' + p.segFecha + '\\n' +
+      'Estado              : ' + p.segEstado + '\\n' +
+      'Estudiante          : ' + (p.estudiante || '-') + '\\n' +
+      'Grado               : ' + (p.grado || '-') + '\\n\\n' +
+      'Nueva respuesta de nuestro equipo:\\n' + p.segRespuesta + '\\n\\n';
+    cierre = 'Seguimos trabajando para ofrecerte la mejor experiencia y acompañamiento.\\nGracias por permitirnos continuar mejorando nuestro servicio. Tu voz hace la diferencia.\\n\\n';
+  } else {
+    intro =
+      'Hola, ' + nombre + '. Esperamos que te encuentres muy bien.\\n\\n' +
+      '¡Tenemos novedades sobre tu solicitud! El equipo de ' + dep + ' ya la revisó y gestionó.\\n' +
+      'A continuación te compartimos la respuesta oficial para tu caso.\\n\\n';
+    detalle =
+      'Número de solicitud : ' + p.id + '\\n' +
+      'Fecha de gestión    : ' + p.segFecha + '\\n' +
+      'Estado              : ' + p.segEstado + '\\n' +
+      'Estudiante          : ' + (p.estudiante || '-') + '\\n' +
+      'Grado               : ' + (p.grado || '-') + '\\n\\n' +
+      'Respuesta de nuestro equipo:\\n' + p.segRespuesta + '\\n\\n';
+    cierre = 'Si tienes alguna pregunta adicional o consideras que tu caso no fue resuelto satisfactoriamente,\\npuedes registrar una observación usando el enlace que encontrarás más abajo.\\nEstamos aquí para acompañarte en todo el proceso.\\n\\n';
+  }
+  const cuerpo = intro + detalle + cierre + bloqueEnlace +
+    'En el Colegio Goyavier Campestre trabajamos cada día para brindarte la mejor atención.\\n' +
+    'Tu bienestar y el de tu familia son muy importantes para nosotros.\\n\\n' +
+    'Con mucho gusto te atendemos,\\nEquipo PQRS · Colegio Goyavier Campestre';
   GmailApp.sendEmail(destinatario, asunto, cuerpo, {name: 'PQRS Colegio Goyavier', replyTo: EMAIL_RESP});
   return jsonOut({ok: true, to: destinatario});
 }
@@ -3597,10 +3675,10 @@ function serveFormRespuestaArea_(p) {
     const estadoIdx = headers.indexOf('Estado');
     const row = data.slice(1).find(function(r) { return String(r[idIdx]).trim() === id; });
     if (!row) return HtmlService.createHtmlOutput('<p style="font-family:sans-serif;padding:24px;">Solicitud no encontrada.</p>');
-    const nombre = String(row[nombreIdx] || '');
-    const tipo   = String(row[tipoIdx]   || '');
-    const desc   = String(row[descIdx]   || '');
-    const estado = String(row[estadoIdx] || '');
+    const nombre = sanitizeHtml_(row[nombreIdx] || '');
+    const tipo   = sanitizeHtml_(row[tipoIdx]   || '');
+    const desc   = sanitizeHtml_(row[descIdx]   || '');
+    const estado = sanitizeHtml_(row[estadoIdx] || '');
     const formNonce = Utilities.getUuid();
     const scriptUrl = ScriptApp.getService().getUrl();
     const css =
@@ -3623,20 +3701,20 @@ function serveFormRespuestaArea_(p) {
     const html =
       '<!DOCTYPE html><html lang="es"><head>' +
       '<meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>' +
-      '<title>PQRS Goyavier &middot; Respuesta del area</title>' +
+      '<title>Colegio Goyavier · Registra tu respuesta</title>' +
       '<style>' + css + '</style></head><body>' +
       '<div class="card">' +
-      '<div class="card-header"><h1>Colegio Goyavier Campestre &mdash; ' + area + '</h1><p>Sistema PQRS &middot; Respuesta del area encargada</p></div>' +
+      '<div class="card-header"><h1>Colegio Goyavier Campestre &mdash; ' + sanitizeHtml_(area) + '</h1><p>Sistema PQRS &middot; Tu respuesta hace la diferencia para nuestras familias</p></div>' +
       '<div class="card-body">' +
       '<div class="info">' +
-      '<b>Solicitud:</b> ' + id + ' &nbsp;<span class="badge">' + tipo + '</span><br>' +
+      '<b>Solicitud:</b> ' + sanitizeHtml_(id) + ' &nbsp;<span class="badge">' + tipo + '</span><br>' +
       '<b>Solicitante:</b> ' + nombre + '<br>' +
       '<b>Estado actual:</b> ' + estado +
       '</div>' +
-      '<div class="desc"><b>Descripcion del caso:</b><br>' + desc + '</div>' +
-      '<label for="obs">Respuesta o gestion del area</label>' +
-      '<textarea id="obs" required placeholder="Describa la gestion realizada o la respuesta al caso..."></textarea>' +
-      '<button id="sbtn" onclick="enviarRespuestaArea()">Enviar respuesta</button>' +
+      '<div class="desc"><b>Descripción de la solicitud:</b><br>' + desc + '</div>' +
+      '<label for="obs">Tu respuesta o gestión del caso</label>' +
+      '<textarea id="obs" required placeholder="Describe detalladamente la gestión realizada o la respuesta a esta solicitud..."></textarea>' +
+      '<button id="sbtn" onclick="enviarRespuestaArea()">Registrar mi respuesta</button>' +
       '<div id="msg-error"></div>' +
       '<scr' + 'ipt>' +
       'var SCRIPT_URL = "' + scriptUrl + '";' +
@@ -3645,7 +3723,7 @@ function serveFormRespuestaArea_(p) {
       'var FORM_NONCE = "' + formNonce + '";' +
       'function enviarRespuestaArea() {' +
       '  var obs = document.getElementById("obs").value.trim();' +
-      '  if (!obs) { document.getElementById("msg-error").style.display="block"; document.getElementById("msg-error").textContent="Por favor escriba la respuesta antes de enviar."; return; }' +
+      '  if (!obs) { document.getElementById("msg-error").style.display="block"; document.getElementById("msg-error").textContent="Por favor escribe tu respuesta o gestión antes de continuar."; return; }' +
       '  var btn = document.getElementById("sbtn");' +
       '  btn.disabled = true; btn.textContent = "Enviando...";' +
       '  document.getElementById("msg-error").style.display="none";' +
@@ -3654,17 +3732,17 @@ function serveFormRespuestaArea_(p) {
       '    .then(function(r){ return r.json(); })' +
       '    .then(function(data){' +
       '      if (data.ok) {' +
-      '        document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0;"><div style="font-size:48px;margin-bottom:16px;">&#x2705;</div><h2 style="color:#0d5a96;margin-bottom:10px;">Respuesta enviada</h2><p style="color:#718096;font-size:14px;line-height:1.7;">La respuesta fue registrada para la solicitud <strong>' + id + '</strong>.<br><br>Secretaria Academica la revisara y validara antes de enviarsela al solicitante.</p></div>\';' +
+      '        document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0;"><div style="font-size:48px;margin-bottom:16px;">&#x2705;</div><h2 style="color:#0d5a96;margin-bottom:10px;">¡Respuesta registrada!</h2><p style="color:#718096;font-size:14px;line-height:1.7;">¡Gracias por tu gestión! La respuesta a la solicitud <strong>' + id + '</strong> fue registrada exitosamente.<br><br>Secretaría Académica la revisará y la enviará al solicitante a la brevedad. Tu aporte es fundamental para brindar la mejor atención a nuestras familias.</p></div>\';' +
       '      } else {' +
-      '        btn.disabled = false; btn.textContent = "Enviar respuesta";' +
+      '        btn.disabled = false; btn.textContent = "Registrar mi respuesta";' +
       '        document.getElementById("msg-error").style.display="block";' +
-      '        document.getElementById("msg-error").textContent = "Error: " + (data.error || "Intente de nuevo.");' +
+      '        document.getElementById("msg-error").textContent = "Error: " + (data.error || "Por favor intenta de nuevo.");' +
       '      }' +
       '    })' +
       '    .catch(function(err){' +
-      '      btn.disabled = false; btn.textContent = "Enviar respuesta";' +
+      '      btn.disabled = false; btn.textContent = "Registrar mi respuesta";' +
       '      document.getElementById("msg-error").style.display="block";' +
-      '      document.getElementById("msg-error").textContent = "Error de conexion. Por favor intente de nuevo.";' +
+      '      document.getElementById("msg-error").textContent = "Error de conexión. Por favor intenta de nuevo.";' +
       '    });' +
       '}' +
       '<\/scr' + 'ipt>' +
@@ -3705,19 +3783,19 @@ function guardarRespuestaArea_(p) {
     const html =
       '<!DOCTYPE html><html lang="es"><head>' +
       '<meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>' +
-      '<title>Respuesta enviada</title>' +
+      '<title>¡Respuesta registrada! · Colegio Goyavier</title>' +
       '<style>* { box-sizing: border-box; margin: 0; padding: 0; }' +
       'body { font-family: Segoe UI, sans-serif; background: linear-gradient(145deg,#073f6e 0%,#0d5a96 55%,#1575bc 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }' +
-      '.card { background: #fff; border-radius: 14px; width: 100%; max-width: 400px; box-shadow: 0 16px 48px rgba(7,63,110,0.35); text-align: center; padding: 40px 28px; }' +
+      '.card { background: #fff; border-radius: 14px; width: 100%; max-width: 420px; box-shadow: 0 16px 48px rgba(7,63,110,0.35); text-align: center; padding: 40px 28px; }' +
       '.icon { font-size: 48px; margin-bottom: 16px; }' +
       'h2 { color: #0d5a96; font-size: 20px; margin-bottom: 10px; }' +
       'p { color: #718096; font-size: 14px; line-height: 1.7; }</style></head><body>' +
       '<div class="card"><div class="icon">&#x2705;</div>' +
-      '<h2>Respuesta enviada</h2>' +
-      '<p>La respuesta de <strong>' + area + '</strong> fue registrada para la solicitud <strong>' + id + '</strong>.<br><br>' +
-      'Secretaria Academica la revisara antes de enviarsela al solicitante.</p>' +
+      '<h2>¡Respuesta registrada!</h2>' +
+      '<p>¡Gracias por tu gestión! La respuesta de <strong>' + area + '</strong> fue registrada para la solicitud <strong>' + id + '</strong>.<br><br>' +
+      'Secretaría Académica la revisará y la enviará al solicitante a la brevedad. Tu aporte es fundamental para brindar la mejor atención a nuestras familias.</p>' +
       '</div></body></html>';
-    return HtmlService.createHtmlOutput(html).setTitle('Respuesta enviada');
+    return HtmlService.createHtmlOutput(html).setTitle('¡Respuesta registrada! · Colegio Goyavier');
   } catch(err) {
     return HtmlService.createHtmlOutput('<p style="font-family:sans-serif;padding:24px;color:#e53e3e;">Error: ' + err.message + '</p>');
   }
@@ -3725,8 +3803,8 @@ function guardarRespuestaArea_(p) {
 
 function guardarRespuestaAreaJson_(p) {
   const id    = String(p.id    || '').trim();
-  const area  = String(p.area  || '').trim();
-  const obs   = String(p.obs   || '').trim();
+  const area  = String(p.area  || '').trim().slice(0, 200);
+  const obs   = String(p.obs   || '').trim().slice(0, 5000);
   const nonce = String(p.nonce || '').trim();
   if (!id || !obs) return jsonOut({ok: false, error: 'Datos incompletos.'});
   try {
@@ -3763,36 +3841,27 @@ function guardarRespuestaAreaJson_(p) {
     const ahora    = new Date().toISOString();
     const segKey   = nonce ? id + '_' + nonce : '';
     segSheet.appendRow([id, fechaHoy, obs, 'Proceso', ahora, 'area', area, segKey]);
-    const pqrsSheet = ss.getSheetByName(SHEET_NAME);
-    if (pqrsSheet) {
-      const pqrsData  = pqrsSheet.getDataRange().getValues();
-      const pqrsHdrs  = pqrsData[0];
-      const pqrsIdCol = pqrsHdrs.indexOf('ID');
-      const correoCol = pqrsHdrs.indexOf('Correo');
-      const nombreCol = pqrsHdrs.indexOf('Nombre');
-      const estudCol  = pqrsHdrs.indexOf('Estudiante');
-      const gradoCol  = pqrsHdrs.indexOf('Grado');
-      const pqrsRow   = pqrsData.slice(1).find(function(r) { return String(r[pqrsIdCol]).trim() === id; });
-      if (pqrsRow) {
-        const correo = correoCol >= 0 ? String(pqrsRow[correoCol] || '').trim() : '';
-        if (correo) {
-          const nombre     = nombreCol >= 0 ? String(pqrsRow[nombreCol] || 'solicitante') : 'solicitante';
-          const estudiante = estudCol  >= 0 ? String(pqrsRow[estudCol]  || '-') : '-';
-          const grado      = gradoCol  >= 0 ? String(pqrsRow[gradoCol]  || '-') : '-';
-          const enlaceResp = ScriptApp.getService().getUrl() + '?action=responder&id=' + encodeURIComponent(id);
-          const asunto = '[PQRS Goyavier] Actualización de su solicitud ' + id;
-          const cuerpo =
-            'Estimado(a) ' + nombre + ',\\n\\n' +
-            'La dependencia ' + area + ' ha registrado una respuesta/gestión para su solicitud PQRS.\\n\\n' +
-            'Consecutivo: ' + id + '\\nEstudiante: ' + estudiante + '\\nGrado: ' + grado + '\\n\\n' +
-            'Respuesta del área:\\n' + obs + '\\n\\n' +
-            '──────────────────────────────────────────\\n' +
-            'Si no está de acuerdo, puede registrar sus observaciones aquí:\\n' + enlaceResp + '\\n' +
-            '──────────────────────────────────────────\\n\\nCordialmente,\\nColegio Goyavier Campestre';
-          try { GmailApp.sendEmail(correo, asunto, cuerpo, {name: 'PQRS Colegio Goyavier', replyTo: EMAIL_RESP}); } catch(e) {}
-        }
-      }
-    }
+    // Notificar a Secretaría — la respuesta del área aún no se envía al solicitante hasta que Secretaría la apruebe
+    try {
+      const esObservacion = String(p.tipo || '').toLowerCase() === 'observacion';
+      const asuntoSec = esObservacion
+        ? '[PQRS Goyavier] ' + area + ' respondió a la observación del solicitante · ' + id
+        : '[PQRS Goyavier] ' + area + ' registró respuesta a la solicitud · ' + id;
+      const cuerpoSec = esObservacion
+        ? 'El equipo de ' + area + ' ha revisado la observación o inconformidad registrada por el solicitante ' +
+          'en la solicitud ' + id + ' y ha generado una nueva respuesta relacionada con dicha observación.\\n\\n' +
+          'Nueva respuesta del área:\\n' + obs + '\\n\\n' +
+          'Por favor ingrese al sistema PQRS para revisar esta respuesta y, si es adecuada, enviarla oficialmente al solicitante.\\n' +
+          'Recuerde que el solicitante está a la espera de una respuesta a su observación.\\n\\n' +
+          'Importante: Esta respuesta aún no ha sido enviada al solicitante. Solo Secretaría o Rectoría pueden hacerlo desde la aplicación.\\n\\n' +
+          'Con atención,\\nSistema PQRS · Colegio Goyavier Campestre'
+        : 'El equipo de ' + area + ' acaba de registrar su respuesta a la solicitud ' + id + '.\\n\\n' +
+          'Respuesta del área:\\n' + obs + '\\n\\n' +
+          'Por favor ingrese al sistema PQRS para revisar esta respuesta y, si es adecuada, enviarla oficialmente al solicitante.\\n\\n' +
+          'Importante: Esta respuesta aún no ha sido enviada al solicitante. Solo Secretaría o Rectoría pueden hacerlo desde la aplicación.\\n\\n' +
+          'Con atención,\\nSistema PQRS · Colegio Goyavier Campestre';
+      GmailApp.sendEmail(EMAIL_RESP, asuntoSec, cuerpoSec, {name: 'PQRS Colegio Goyavier'});
+    } catch(mailErr) { Logger.log('Error correo secretaria: ' + mailErr.message); }
     return jsonOut({ok: true});
   } catch(err) {
     return jsonOut({ok: false, error: err.message});
@@ -3843,70 +3912,103 @@ function serveFormRespuesta_(p) {
       '.btn-primary { background: linear-gradient(90deg,#0d5a96,#1575bc); color: #fff; }' +
       '.btn-danger { background: linear-gradient(90deg,#c53030,#e53e3e); color: #fff; }' +
       '.section { display: none; }' +
-      '.confirm-box { background: #fff5f5; border: 1.5px solid #fed7d7; border-radius: 8px; padding: 14px; font-size: 13px; color: #742a2a; line-height: 1.6; margin-bottom: 4px; }' +
+      '.confirm-box { background: #fff5f5; border: 1.5px solid #fed7d7; border-radius: 8px; padding: 14px; font-size: 13px; color: #742a2a; line-height: 1.6; margin-bottom: 14px; }' +
       '.msg { text-align: center; padding: 14px; font-size: 14px; border-radius: 8px; margin-top: 4px; }' +
       '.warn { color: #856404; background: #fffbeb; }' +
       '.success { color: #276749; background: #f0fff4; }' +
-      '.err-msg { display:none; color:#c53030; margin-top:10px; font-size:13px; }';
+      '.err-msg { display:none; color:#c53030; margin-top:10px; font-size:13px; }' +
+      '.rating-box { margin: 0 0 14px; padding: 14px; background: #fffbeb; border: 1.5px solid #f6e05e; border-radius: 8px; }' +
+      '.rating-label { font-size: 13px; font-weight: 700; color: #744210; margin-bottom: 10px; }' +
+      '.stars { display: flex; gap: 8px; font-size: 34px; cursor: pointer; margin-bottom: 6px; }' +
+      '.star { color: #d0d0d0; transition: color 0.15s; user-select: none; line-height: 1; }' +
+      '.star.active { color: #f6a609; }' +
+      '.rating-text { font-size: 12px; color: #856404; min-height: 16px; font-weight: 600; }';
     var formBody;
     if (yaCerrado) {
-      formBody = '<div class="msg success">&#x2705; Esta solicitud ya fue cerrada satisfactoriamente. Gracias por su confirmacion.</div>';
+      formBody = '<div class="msg success">&#x2705; ¡Tu solicitud fue cerrada exitosamente!<br><br>Nos alegra mucho saber que tu caso fue atendido de manera satisfactoria.<br><br>En el Colegio Goyavier Campestre trabajamos cada día para brindarte la mejor atención. ¡Gracias por confiar en nosotros!</div>';
     } else if (yaApelado) {
-      formBody = '<div class="msg warn">&#x26A0;&#xFE0F; Ya registramos una observacion para esta solicitud. Si necesita comunicarse con nosotros escribanos a <a href="mailto:' + EMAIL_RESP + '">' + EMAIL_RESP + '</a>.</div>';
+      formBody = '<div class="msg warn">&#x26A0;&#xFE0F; Ya recibimos tu observación para esta solicitud. Nuestro equipo la revisará a la brevedad y te contactaremos pronto. Si necesitas comunicarte con nosotros escríbenos a <a href="mailto:' + EMAIL_RESP + '">' + EMAIL_RESP + '</a>.<br><br>Gracias por permitirnos acompañarte en este proceso.</div>';
     } else {
       formBody =
-        '<label for="accion">&#xBF;Que desea hacer?</label>' +
+        '<label for="accion">¿Cómo podemos ayudarte hoy?</label>' +
         '<select id="accion" onchange="mostrarSeccion(this.value)">' +
-        '  <option value="">-- Seleccione una opcion --</option>' +
-        '  <option value="cerrar">Cerrar PQRS (respuesta satisfactoria)</option>' +
-        '  <option value="obs">Registrar observacion o inconformidad</option>' +
+        '  <option value="">-- Cuéntanos qué necesitas --</option>' +
+        '  <option value="cerrar">Estoy satisfecho(a), deseo cerrar mi solicitud</option>' +
+        '  <option value="obs">Tengo una observación o quiero añadir algo más</option>' +
         '</select>' +
         '<div id="sec-cerrar" class="section">' +
-        '  <div class="confirm-box">Al confirmar, el PQRS quedara cerrado definitivamente y se registrara que la respuesta fue satisfactoria.</div>' +
-        '  <button class="btn btn-danger" id="btn-cerrar" onclick="cerrarPqrs()">Confirmar cierre del PQRS</button>' +
+        '  <div class="confirm-box">Al confirmar, tu solicitud quedará cerrada y registraremos que tu caso fue atendido satisfactoriamente. ¡Gracias por tu confianza!</div>' +
+        '  <div class="rating-box">' +
+        '    <p class="rating-label">&#x2B50; ¿Cómo calificarías la atención recibida? <span style="color:#c53030;font-size:12px;">(requerido)</span></p>' +
+        '    <div class="stars" id="estrellas">' +
+        '      <span class="star" onclick="setRating(1)">&#x2605;</span>' +
+        '      <span class="star" onclick="setRating(2)">&#x2605;</span>' +
+        '      <span class="star" onclick="setRating(3)">&#x2605;</span>' +
+        '      <span class="star" onclick="setRating(4)">&#x2605;</span>' +
+        '      <span class="star" onclick="setRating(5)">&#x2605;</span>' +
+        '    </div>' +
+        '    <p class="rating-text" id="rating-text">Toca una estrella para calificar</p>' +
+        '  </div>' +
+        '  <button class="btn btn-danger" id="btn-cerrar" onclick="cerrarPqrs()">&#x2714;&#xFE0F; Confirmar, estoy satisfecho(a)</button>' +
         '  <div id="err-cerrar" class="err-msg"></div>' +
         '</div>' +
         '<div id="sec-obs" class="section">' +
-        '  <label for="obs">Escriba su observacion o inconformidad</label>' +
-        '  <textarea id="obs" placeholder="Describa detalladamente su observacion..."></textarea>' +
-        '  <button class="btn btn-primary" id="btn-obs" onclick="enviarObservacion()">Enviar observacion</button>' +
+        '  <label for="obs">Cuéntanos tu observación o inconformidad</label>' +
+        '  <textarea id="obs" placeholder="Cuéntanos con detalle tu observación o inconformidad..."></textarea>' +
+        '  <button class="btn btn-primary" id="btn-obs" onclick="enviarObservacion()">Enviar mi observación</button>' +
         '  <div id="err-obs" class="err-msg"></div>' +
         '</div>' +
         '<script>' +
         'var SCRIPT_URL = "' + scriptUrl + '";' +
         'var SOL_ID = "' + id + '";' +
+        'var selectedRating = 0;' +
+        'var ratingLabels = ["","Muy malo 😞","Malo 🙁","Regular 😐","Bueno 😊","\\u00A1Excelente! 😄"];' +
         'function mostrarSeccion(val) {' +
         '  document.getElementById("sec-cerrar").style.display = val === "cerrar" ? "block" : "none";' +
         '  document.getElementById("sec-obs").style.display    = val === "obs"    ? "block" : "none";' +
         '}' +
+        'function setRating(val) {' +
+        '  selectedRating = val;' +
+        '  var stars = document.querySelectorAll("#estrellas .star");' +
+        '  stars.forEach(function(s, i) { s.classList.toggle("active", i < val); });' +
+        '  document.getElementById("rating-text").textContent = ratingLabels[val] + " (" + val + "/5)";' +
+        '  document.getElementById("err-cerrar").style.display = "none";' +
+        '}' +
         'function cerrarPqrs() {' +
+        '  var errEl = document.getElementById("err-cerrar");' +
+        '  if (!selectedRating) {' +
+        '    errEl.style.display = "block"; errEl.textContent = "Por favor selecciona una calificación antes de confirmar el cierre.";' +
+        '    return;' +
+        '  }' +
         '  var btn = document.getElementById("btn-cerrar");' +
         '  btn.disabled = true; btn.textContent = "Procesando...";' +
-        '  document.getElementById("err-cerrar").style.display = "none";' +
-        '  var url = SCRIPT_URL + "?action=cerrarPqrsJson&id=" + encodeURIComponent(SOL_ID);' +
+        '  errEl.style.display = "none";' +
+        '  var url = SCRIPT_URL + "?action=cerrarPqrsJson&id=" + encodeURIComponent(SOL_ID) + "&calificacion=" + selectedRating;' +
         '  fetch(url).then(function(r){ return r.json(); }).then(function(d){' +
         '    if (d.ok) {' +
-        '      document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0"><div style="font-size:48px;margin-bottom:16px">&#x2705;</div><h2 style="color:#0d5a96;margin-bottom:10px">PQRS cerrado</h2><p style="color:#718096;font-size:14px;line-height:1.7">Su solicitud <strong>' + id + '</strong> ha sido cerrada satisfactoriamente.<br><br>Gracias por su confirmacion.<br><br><a href="mailto:' + EMAIL_RESP + '">' + EMAIL_RESP + '</a></p></div>\';' +
+        '      var starsHtml = "";' +
+        '      for (var i = 1; i <= 5; i++) starsHtml += (i <= selectedRating ? "\\u2605" : "\\u2606");' +
+        '      document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0"><div style="font-size:48px;margin-bottom:16px">&#x2705;</div><h2 style="color:#0d5a96;margin-bottom:10px">\\u00A1Muchas gracias!</h2><p style="color:#718096;font-size:14px;line-height:1.7">Nos alegra saber que tu solicitud <strong>' + id + '</strong> fue atendida de manera satisfactoria.<br><br><span style="font-size:22px;color:#f6a609;">\' + starsHtml + \'</span><br><span style="font-size:13px;color:#856404;font-weight:600;">\' + ratingLabels[selectedRating] + \' (\' + selectedRating + \'/5)</span><br><br>Tu calificaci\\u00F3n ha sido registrada. En el Colegio Goyavier Campestre trabajamos cada d\\u00EDa para brindarte la mejor atenci\\u00F3n.<br><br><a href="mailto:' + EMAIL_RESP + '">' + EMAIL_RESP + '</a></p></div>\';' +
         '    } else {' +
-        '      btn.disabled = false; btn.textContent = "Confirmar cierre del PQRS";' +
+        '      btn.disabled = false; btn.textContent = "\\u2714\\uFE0F Confirmar, estoy satisfecho(a)";' +
         '      var e = document.getElementById("err-cerrar"); e.style.display = "block"; e.textContent = "Error: " + (d.error || "Intente de nuevo.");' +
         '    }' +
         '  }).catch(function(){' +
-        '    btn.disabled = false; btn.textContent = "Confirmar cierre del PQRS";' +
-        '    var e = document.getElementById("err-cerrar"); e.style.display = "block"; e.textContent = "Error de conexion. Intente de nuevo.";' +
+        '    btn.disabled = false; btn.textContent = "\\u2714\\uFE0F Confirmar, estoy satisfecho(a)";' +
+        '    var e = document.getElementById("err-cerrar"); e.style.display = "block"; e.textContent = "Error de conexión. Intente de nuevo.";' +
         '  });' +
         '}' +
         'function enviarObservacion() {' +
         '  var obs = document.getElementById("obs").value.trim();' +
         '  var errEl = document.getElementById("err-obs");' +
-        '  if (!obs) { errEl.style.display = "block"; errEl.textContent = "Por favor escriba su observacion antes de enviar."; return; }' +
+        '  if (!obs) { errEl.style.display = "block"; errEl.textContent = "Por favor cuéntanos tu observación antes de enviar."; return; }' +
         '  var btn = document.getElementById("btn-obs");' +
         '  btn.disabled = true; btn.textContent = "Enviando...";' +
         '  errEl.style.display = "none";' +
         '  var url = SCRIPT_URL + "?action=guardarRespuestaJson&id=" + encodeURIComponent(SOL_ID) + "&obs=" + encodeURIComponent(obs);' +
         '  fetch(url).then(function(r){ return r.json(); }).then(function(d){' +
         '    if (d.ok) {' +
-        '      document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0"><div style="font-size:48px;margin-bottom:16px">&#x1F4E8;</div><h2 style="color:#0d5a96;margin-bottom:10px">Observacion registrada</h2><p style="color:#718096;font-size:14px;line-height:1.7">Su observacion fue recibida para la solicitud <strong>' + id + '</strong>.<br><br>El equipo del Colegio Goyavier Campestre la revisara a la brevedad.<br><br><a href="mailto:' + EMAIL_RESP + '">' + EMAIL_RESP + '</a></p></div>\';' +
+        '      document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0"><div style="font-size:48px;margin-bottom:16px">&#x1F4E8;</div><h2 style="color:#0d5a96;margin-bottom:10px">¡Recibimos tu observación!</h2><p style="color:#718096;font-size:14px;line-height:1.7">Gracias por tomarte el tiempo de compartir tu opinión sobre la solicitud <strong>' + id + '</strong>.<br><br>Nuestro equipo la revisará con atención y te contactaremos a la brevedad. Estamos atentos a brindarte el mejor acompañamiento posible.<br><br>Gracias por permitirnos acompañarte en este proceso.<br><br><a href="mailto:' + EMAIL_RESP + '">' + EMAIL_RESP + '</a></p></div>\';' +
         '    } else {' +
         '      btn.disabled = false; btn.textContent = "Enviar observacion";' +
         '      errEl.style.display = "block"; errEl.textContent = "Error: " + (d.error || "Intente de nuevo.");' +
@@ -3921,15 +4023,15 @@ function serveFormRespuesta_(p) {
     const html =
       '<!DOCTYPE html><html lang="es"><head>' +
       '<meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>' +
-      '<title>PQRS Goyavier · Confirmacion de respuesta</title>' +
+      '<title>Colegio Goyavier · Respuesta a tu PQRS — Tu opinión es importante para nosotros</title>' +
       '<style>' + css + '</style></head><body>' +
       '<div class="card">' +
-      '<div class="card-header"><h1>Colegio Goyavier Campestre</h1><p>Sistema PQRS &middot; Confirmacion de respuesta</p></div>' +
+      '<div class="card-header"><h1>Colegio Goyavier Campestre</h1><p>Respuesta a tu solicitud PQRS &middot; Tu experiencia y bienestar son lo más importante para nosotros</p></div>' +
       '<div class="card-body">' +
       '<div class="info"><b>Solicitud:</b> ' + id + '<br><b>Solicitante:</b> ' + nombre + '<br><b>Estudiante:</b> ' + estudiante + '<br><b>Tipo:</b> ' + tipo + '</div>' +
       formBody +
       '</div></div></body></html>';
-    return HtmlService.createHtmlOutput(html).setTitle('PQRS Goyavier · Confirmacion de respuesta');
+    return HtmlService.createHtmlOutput(html).setTitle('Colegio Goyavier · Respuesta a tu PQRS — Tu opinión es importante para nosotros');
   } catch(err) {
     return HtmlService.createHtmlOutput('<p style="font-family:sans-serif;padding:24px;">Error: ' + err.message + '</p>');
   }
@@ -3969,28 +4071,35 @@ function guardarRespuestaSolicitante_(p) {
     sheet.getRange(rowNum, obsIdx   + 1).setValue(obs);
     sheet.getRange(rowNum, fechaIdx + 1).setValue(fechaHoy);
     try {
-      const asunto = '[PQRS Goyavier] Observación del solicitante en ' + id;
-      const cuerpo = 'El solicitante ha registrado una observación para la solicitud ' + id + '.\\n\\nObservación:\\n' + obs + '\\n\\nIngrese al sistema para revisar y dar seguimiento.';
+      const asunto = '[PQRS Goyavier] El solicitante registró una observación · ' + id;
+      const cuerpo =
+        'El padre de familia no quedó satisfecho con la respuesta recibida y ha registrado una observación o inconformidad sobre la solicitud ' + id + '.\\n\\n' +
+        'Observación del solicitante:\\n' + obs + '\\n\\n' +
+        'El caso ha pasado al estado "Apelado". Por favor ingrese al sistema PQRS para revisar la observación,\\n' +
+        'comunicarla al área responsable y hacer el seguimiento correspondiente.\\n\\n' +
+        'Recuerde que el solicitante está esperando una nueva respuesta que atienda su inconformidad.\\n\\n' +
+        'Con atención,\\nSistema PQRS · Colegio Goyavier Campestre';
       GmailApp.sendEmail(EMAIL_RESP, asunto, cuerpo, {name: 'PQRS Colegio Goyavier'});
     } catch(e) {}
     const html =
       '<!DOCTYPE html><html lang="es"><head>' +
       '<meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>' +
-      '<title>Observacion registrada</title>' +
+      '<title>¡Recibimos tu observación! · Colegio Goyavier</title>' +
       '<style>* { box-sizing: border-box; margin: 0; padding: 0; }' +
       'body { font-family: Segoe UI, sans-serif; background: linear-gradient(145deg,#073f6e 0%,#0d5a96 55%,#1575bc 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }' +
-      '.card { background: #fff; border-radius: 14px; width: 100%; max-width: 400px; box-shadow: 0 16px 48px rgba(7,63,110,0.35); text-align: center; padding: 40px 28px; }' +
+      '.card { background: #fff; border-radius: 14px; width: 100%; max-width: 420px; box-shadow: 0 16px 48px rgba(7,63,110,0.35); text-align: center; padding: 40px 28px; }' +
       '.icon { font-size: 48px; margin-bottom: 16px; }' +
       'h2 { color: #0d5a96; font-size: 20px; margin-bottom: 10px; }' +
       'p { color: #718096; font-size: 14px; line-height: 1.7; }' +
       'a { color: #1575bc; }</style></head><body>' +
-      '<div class="card"><div class="icon">&#x2705;</div>' +
-      '<h2>Observacion registrada</h2>' +
-      '<p>Su observacion fue recibida para la solicitud <strong>' + id + '</strong>.<br><br>' +
-      'El equipo del Colegio Goyavier Campestre la revisara a la brevedad.<br><br>' +
+      '<div class="card"><div class="icon">&#x1F4E8;</div>' +
+      '<h2>¡Recibimos tu observación!</h2>' +
+      '<p>Gracias por tomarte el tiempo de compartir tu opinión sobre la solicitud <strong>' + id + '</strong>.<br><br>' +
+      'Nuestro equipo la revisará con atención y te contactaremos a la brevedad. Estamos atentos a brindarte el mejor acompañamiento posible.<br><br>' +
+      'Gracias por permitirnos acompañarte en este proceso.<br><br>' +
       '<a href="mailto:' + EMAIL_RESP + '">' + EMAIL_RESP + '</a></p>' +
       '</div></body></html>';
-    return HtmlService.createHtmlOutput(html).setTitle('Observacion registrada');
+    return HtmlService.createHtmlOutput(html).setTitle('¡Recibimos tu observación!');
   } catch(err) {
     return HtmlService.createHtmlOutput('<p style="font-family:sans-serif;padding:24px;color:#e53e3e;">Error: ' + err.message + '</p>');
   }
@@ -3998,7 +4107,7 @@ function guardarRespuestaSolicitante_(p) {
 
 function guardarRespuestaSolicitanteJson_(p) {
   const id  = String(p.id  || '').trim();
-  const obs = String(p.obs || '').trim();
+  const obs = String(p.obs || '').trim().slice(0, 5000);
   if (!id || !obs) return jsonOut({ok: false, error: 'Datos incompletos.'});
   try {
     const ss    = SpreadsheetApp.getActiveSpreadsheet();
@@ -4030,8 +4139,14 @@ function guardarRespuestaSolicitanteJson_(p) {
     sheet.getRange(rowNum, obsIdx   + 1).setValue(obs);
     sheet.getRange(rowNum, fechaIdx + 1).setValue(fechaHoy);
     try {
-      const asunto = '[PQRS Goyavier] Observación del solicitante en ' + id;
-      const cuerpo = 'El solicitante ha registrado una observación para la solicitud ' + id + '.\\n\\nObservación:\\n' + obs + '\\n\\nIngrese al sistema para revisar y dar seguimiento.';
+      const asunto = '[PQRS Goyavier] El solicitante registró una observación · ' + id;
+      const cuerpo =
+        'El padre de familia no quedó satisfecho con la respuesta recibida y ha registrado una observación o inconformidad sobre la solicitud ' + id + '.\\n\\n' +
+        'Observación del solicitante:\\n' + obs + '\\n\\n' +
+        'El caso ha pasado al estado "Apelado". Por favor ingrese al sistema PQRS para revisar la observación,\\n' +
+        'comunicarla al área responsable y hacer el seguimiento correspondiente.\\n\\n' +
+        'Recuerde que el solicitante está esperando una nueva respuesta que atienda su inconformidad.\\n\\n' +
+        'Con atención,\\nSistema PQRS · Colegio Goyavier Campestre';
       GmailApp.sendEmail(EMAIL_RESP, asunto, cuerpo, {name: 'PQRS Colegio Goyavier'});
     } catch(e) {}
     return jsonOut({ok: true});
@@ -4041,14 +4156,15 @@ function guardarRespuestaSolicitanteJson_(p) {
 }
 
 function cerrarPqrsSolicitanteJson_(p) {
-  const id = String(p.id || '').trim();
+  const id  = String(p.id  || '').trim();
+  const cal = Math.min(5, Math.max(0, parseInt(p.calificacion || '0') || 0)); // 1–5
   if (!id) return jsonOut({ok: false, error: 'ID requerido'});
   try {
     const ss    = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(SHEET_NAME);
     if (!sheet) return jsonOut({ok: false, error: 'Hoja no encontrada'});
     const data    = sheet.getDataRange().getValues();
-    const headers = data[0];
+    const headers = data[0].map(String);
     const idIdx     = headers.indexOf('ID');
     const estadoIdx = headers.indexOf('Estado');
     var rowNum = -1;
@@ -4059,9 +4175,19 @@ function cerrarPqrsSolicitanteJson_(p) {
     const estadoActual = String(data[rowNum - 1][estadoIdx] || '');
     if (estadoActual === 'Cerrado') return jsonOut({ok: false, error: 'La solicitud ya esta cerrada.'});
     sheet.getRange(rowNum, estadoIdx + 1).setValue('Cerrado');
+    // Guardar calificación en columna Calificacion
+    if (cal >= 1 && cal <= 5) {
+      let calIdx = headers.indexOf('Calificacion');
+      if (calIdx < 0) {
+        calIdx = headers.length;
+        sheet.getRange(1, calIdx + 1).setValue('Calificacion').setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
+      }
+      sheet.getRange(rowNum, calIdx + 1).setValue(cal);
+    }
     try {
       const asunto = '[PQRS Goyavier] PQRS cerrado por el solicitante · ' + id;
-      const cuerpo = 'El solicitante confirmo que la respuesta fue satisfactoria y cerro la solicitud ' + id + '.\\n\\nNo se requiere accion adicional.';
+      const calInfo = cal >= 1 ? '\\nCalificación otorgada: ' + cal + '/5 estrellas.' : '';
+      const cuerpo = 'El solicitante confirmó que la respuesta fue satisfactoria y cerró la solicitud ' + id + '.' + calInfo + '\\n\\nNo se requiere acción adicional. ¡Buena gestión!';
       GmailApp.sendEmail(EMAIL_RESP, asunto, cuerpo, {name: 'PQRS Colegio Goyavier'});
     } catch(mailErr) {
       Logger.log('Error correo cierre: ' + mailErr.message);
@@ -4085,7 +4211,7 @@ function getHeaders() {
   return ['ID','Fecha','Dependencia','Nombre',
     'Telefono','Correo','Estudiante','Grado','TipoSolicitud','MedioRecepcion',
     'RequiereRespuesta','Descripcion','Estado','EmailPendiente','CreadoEn','OrigenForms',
-    'ObservacionSolicitante','FechaObservacion','FormsKey'];
+    'ObservacionSolicitante','FechaObservacion','FormsKey','Calificacion'];
 }
 
 function ensureHeaders(sheet) {
