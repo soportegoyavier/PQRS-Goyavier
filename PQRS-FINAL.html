@@ -1055,27 +1055,52 @@ textarea { resize: vertical; min-height: 80px; }
 <!-- ════════ MODAL SEGUIMIENTO ════════ -->
 <div class="overlay" id="modal-seg">
   <div class="modal" style="max-width:600px;">
-    <h3>📝 Registrar Seguimiento</h3>
-    <div id="modal-seg-info" style="margin-bottom:14px;"></div>
-    <div class="form-group" style="margin-bottom:12px;">
-      <label>Fecha de Seguimiento <span class="req">*</span></label>
-      <input type="date" id="seg-fecha"/>
+    <!-- Vista 1: Formulario (visible por defecto) -->
+    <div id="modal-seg-form-view">
+      <h3 id="modal-seg-titulo">📝 Registrar Seguimiento</h3>
+      <div id="modal-seg-info" style="margin-bottom:14px;"></div>
+      <div class="form-group" style="margin-bottom:12px;">
+        <label>Fecha de Seguimiento <span class="req">*</span></label>
+        <input type="date" id="seg-fecha"/>
+      </div>
+      <div class="form-group" style="margin-bottom:12px;">
+        <label>Respuesta / Gestión del Área <span class="req">*</span></label>
+        <textarea id="seg-respuesta" style="min-height:90px;" placeholder="Describa la gestión realizada o la respuesta dada al solicitante..."></textarea>
+      </div>
+      <div class="form-group" style="margin-bottom:16px;">
+        <label>Cambiar Estado</label>
+        <select id="seg-estado-nuevo">
+          <option value="Abierto">Abierto</option>
+          <option value="Proceso">En Proceso</option>
+          <option value="Cerrado">Cerrado</option>
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="cerrarModalSeg()">Cancelar</button>
+        <button class="btn btn-primary" id="btn-guardar-seg" onclick="guardarSeguimiento()">💾 Guardar Seguimiento</button>
+      </div>
     </div>
-    <div class="form-group" style="margin-bottom:12px;">
-      <label>Respuesta / Gestión del Área <span class="req">*</span></label>
-      <textarea id="seg-respuesta" style="min-height:90px;" placeholder="Describa la gestión realizada o la respuesta dada al solicitante..."></textarea>
-    </div>
-    <div class="form-group" style="margin-bottom:16px;">
-      <label>Cambiar Estado</label>
-      <select id="seg-estado-nuevo">
-        <option value="Abierto">Abierto</option>
-        <option value="Proceso">En Proceso</option>
-        <option value="Cerrado">Cerrado</option>
-      </select>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-ghost" onclick="cerrarModalSeg()">Cancelar</button>
-      <button class="btn btn-primary" id="btn-guardar-seg" onclick="guardarSeguimiento()">💾 Guardar Seguimiento</button>
+    <!-- Vista 2: Confirmación de correo (oculta por defecto) -->
+    <div id="modal-seg-email-view" style="display:none;">
+      <div style="text-align:center; font-size:44px; margin-bottom:8px;">📧</div>
+      <h3 style="text-align:center; margin-bottom:14px;">¿Enviaste el correo?</h3>
+      <div style="background:var(--blue-light); border-radius:8px; padding:10px 14px; margin-bottom:14px; font-size:13px; line-height:1.6;">
+        <strong>Para:</strong> <span id="modal-seg-email-nombre" style="font-weight:600;"></span><br>
+        <strong>Correo:</strong> <span id="modal-seg-email-dest" style="color:var(--blue-dark); font-weight:700;"></span>
+      </div>
+      <p style="font-size:14px; line-height:1.7; margin-bottom:10px;">
+        Se abrió Gmail con el correo listo para enviar.<br>
+        <strong>Si la ventana sigue abierta, envía el correo y ciérrala.</strong>
+      </p>
+      <div style="background:var(--yellow-light); border:1px solid var(--yellow); border-radius:8px; padding:10px 14px; margin-bottom:18px; font-size:13px; color:var(--gray-700);">
+        Regresa aquí y confirma si lograste enviarlo. El seguimiento solo se guarda si confirmas.
+      </div>
+      <div class="modal-actions" style="flex-direction:column; gap:8px;">
+        <button class="btn btn-primary" onclick="confirmarSegCorreoEnviado()">✅ Sí, lo envié — guardar seguimiento</button>
+        <button class="btn btn-ghost" onclick="reintentarSegCorreo()">📧 Reintentar — abrir Gmail de nuevo</button>
+        <button class="btn btn-ghost" onclick="guardarSegSinCorreo()" style="color:var(--gray-700);">💾 Guardar seguimiento sin enviar correo</button>
+        <button class="btn btn-ghost" onclick="cancelarSegCorreo()" style="color:var(--red);">✖ Cancelar — no guardar nada</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1083,87 +1108,114 @@ textarea { resize: vertical; min-height: 80px; }
 <!-- ════════ MODAL ENVIAR SOLICITUD (antes: despachar) ════════ -->
 <div class="overlay" id="modal-despacho">
   <div class="modal" style="max-width:660px;">
-    <h3>📋 Revisar y Enviar Solicitud</h3>
-    <p>Los datos vienen del formulario. Asigne la dependencia responsable. Puede editar campos si se requiere corrección.</p>
-    <div style="display:flex;gap:10px;margin-bottom:14px;font-size:12px;flex-wrap:wrap;">
-      <span style="background:var(--blue-light);color:var(--blue-dark);padding:5px 11px;border-radius:8px;font-weight:700;">📥 <strong>Dejar abierto</strong> → queda en Correos Pendientes</span>
-      <span style="background:var(--green-light);color:var(--green);padding:5px 11px;border-radius:8px;font-weight:700;">📧 <strong>Enviar ahora</strong> → abre Gmail y pasa a Proceso</span>
-    </div>
-
-    <div style="background:var(--gray-50); border:1.5px solid var(--gray-200); border-radius:10px; padding:14px 16px; margin-bottom:14px;">
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
-        <span style="font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--gray-400);">Datos del Solicitante (del Forms)</span>
-        <button class="btn btn-ghost btn-xs" onclick="toggleEditDespacho()" id="btn-edit-despacho">✏️ Editar</button>
+    <!-- Vista 1: Formulario de despacho (visible por defecto) -->
+    <div id="modal-despacho-form-view">
+      <h3>📋 Revisar y Enviar Solicitud</h3>
+      <p>Los datos vienen del formulario. Asigne la dependencia responsable. Puede editar campos si se requiere corrección.</p>
+      <div style="display:flex;gap:10px;margin-bottom:14px;font-size:12px;flex-wrap:wrap;">
+        <span style="background:var(--blue-light);color:var(--blue-dark);padding:5px 11px;border-radius:8px;font-weight:700;">📥 <strong>Dejar abierto</strong> → queda en Correos Pendientes</span>
+        <span style="background:var(--green-light);color:var(--green);padding:5px 11px;border-radius:8px;font-weight:700;">📧 <strong>Enviar ahora</strong> → abre Gmail y espera confirmación</span>
       </div>
-      <div id="dp-readonly" style="font-size:13px; line-height:1.9; color:var(--gray-800);"></div>
-      <div id="dp-editable" style="display:none;">
-        <div class="form-grid" style="margin-bottom:10px;">
-          <div class="form-group">
-            <label>Nombre Completo</label>
-            <input type="text" id="dp-nombre"/>
+
+      <div style="background:var(--gray-50); border:1.5px solid var(--gray-200); border-radius:10px; padding:14px 16px; margin-bottom:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+          <span style="font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--gray-400);">Datos del Solicitante (del Forms)</span>
+          <button class="btn btn-ghost btn-xs" onclick="toggleEditDespacho()" id="btn-edit-despacho">✏️ Editar</button>
+        </div>
+        <div id="dp-readonly" style="font-size:13px; line-height:1.9; color:var(--gray-800);"></div>
+        <div id="dp-editable" style="display:none;">
+          <div class="form-grid" style="margin-bottom:10px;">
+            <div class="form-group">
+              <label>Nombre Completo</label>
+              <input type="text" id="dp-nombre"/>
+            </div>
+            <div class="form-group">
+              <label>Correo Electrónico</label>
+              <input type="email" id="dp-correo"/>
+            </div>
+            <div class="form-group">
+              <label>Teléfono</label>
+              <input type="tel" id="dp-telefono"/>
+            </div>
+            <div class="form-group">
+              <label>Estudiante</label>
+              <input type="text" id="dp-estudiante"/>
+            </div>
+            <div class="form-group">
+              <label>Grado del Estudiante</label>
+              <input type="text" id="dp-grado"/>
+            </div>
+            <div class="form-group">
+              <label>Tipo de Solicitud</label>
+              <select id="dp-tiposolicitud">
+                <option value="">-- Seleccione --</option>
+                <option>Peticion</option><option>Queja</option>
+                <option>Reclamo</option><option>Felicitacion</option><option>Sugerencia</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Medio de Recepción</label>
+              <select id="dp-medio">
+                <option>Forms</option><option>Verbal</option><option>Fisico</option>
+                <option>Email</option><option>Llamada</option><option>Virtual</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Requiere Respuesta</label>
+              <select id="dp-requiere">
+                <option value="">-- Seleccione --</option>
+                <option>Si</option><option>No</option>
+              </select>
+            </div>
           </div>
           <div class="form-group">
-            <label>Correo Electrónico</label>
-            <input type="email" id="dp-correo"/>
-          </div>
-          <div class="form-group">
-            <label>Teléfono</label>
-            <input type="tel" id="dp-telefono"/>
-          </div>
-          <div class="form-group">
-            <label>Estudiante</label>
-            <input type="text" id="dp-estudiante"/>
-          </div>
-          <div class="form-group">
-            <label>Grado del Estudiante</label>
-            <input type="text" id="dp-grado"/>
-          </div>
-          <div class="form-group">
-            <label>Tipo de Solicitud</label>
-            <select id="dp-tiposolicitud">
-              <option value="">-- Seleccione --</option>
-              <option>Peticion</option><option>Queja</option>
-              <option>Reclamo</option><option>Felicitacion</option><option>Sugerencia</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Medio de Recepción</label>
-            <select id="dp-medio">
-              <option>Forms</option><option>Verbal</option><option>Fisico</option>
-              <option>Email</option><option>Llamada</option><option>Virtual</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>Requiere Respuesta</label>
-            <select id="dp-requiere">
-              <option value="">-- Seleccione --</option>
-              <option>Si</option><option>No</option>
-            </select>
+            <label>Descripción</label>
+            <textarea id="dp-descripcion" style="min-height:70px;"></textarea>
           </div>
         </div>
+      </div>
+
+      <div style="background:var(--yellow-light); border:1.5px solid #f6e05e; border-radius:10px; padding:14px 16px; margin-bottom:16px;">
+        <div style="font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--yellow); margin-bottom:10px;">⭐ Acción requerida</div>
         <div class="form-group">
-          <label>Descripción</label>
-          <textarea id="dp-descripcion" style="min-height:70px;"></textarea>
+          <label>Dependencia Responsable <span class="req">*</span></label>
+          <select id="dp-dependencia" style="border-color:var(--yellow);"><option value="">-- Seleccione a qué área se dirige --</option></select>
         </div>
       </div>
-    </div>
 
-    <div style="background:var(--yellow-light); border:1.5px solid #f6e05e; border-radius:10px; padding:14px 16px; margin-bottom:16px;">
-      <div style="font-size:11px; font-weight:800; text-transform:uppercase; letter-spacing:1px; color:var(--yellow); margin-bottom:10px;">⭐ Acción requerida</div>
-      <div class="form-group">
-        <label>Dependencia Responsable <span class="req">*</span></label>
-        <select id="dp-dependencia" style="border-color:var(--yellow);"><option value="">-- Seleccione a qué área se dirige --</option></select>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="closeModal('modal-despacho')">Cancelar</button>
+        <button class="btn btn-outline" onclick="enviarSolicitud(false)" style="border-color:var(--blue);color:var(--blue);">
+          📥 Dejar abierto · Revisar correo después
+        </button>
+        <button class="btn btn-success" onclick="enviarSolicitud(true)">
+          📧 Enviar correo ahora
+        </button>
       </div>
     </div>
 
-    <div class="modal-actions">
-      <button class="btn btn-ghost" onclick="closeModal('modal-despacho')">Cancelar</button>
-      <button class="btn btn-outline" onclick="enviarSolicitud(false)" style="border-color:var(--blue);color:var(--blue);">
-        📥 Dejar abierto · Revisar correo después
-      </button>
-      <button class="btn btn-success" onclick="enviarSolicitud(true)">
-        📧 Enviar correo ahora
-      </button>
+    <!-- Vista 2: Confirmación de correo al área (oculta por defecto) -->
+    <div id="modal-despacho-confirm-view" style="display:none;">
+      <div style="text-align:center; font-size:44px; margin-bottom:8px;">📧</div>
+      <h3 style="text-align:center; margin-bottom:6px;">¿Enviaste el correo al área?</h3>
+      <p style="text-align:center; font-size:13px; color:var(--gray-500); margin-bottom:16px;">
+        Se abrió Gmail con el correo listo para la dependencia.
+      </p>
+      <div style="background:var(--blue-light); border-radius:8px; padding:10px 14px; margin-bottom:14px; font-size:13px; line-height:1.6;">
+        <strong>Área:</strong> <span id="dp-confirm-area" style="font-weight:700;"></span><br>
+        <strong>Correo:</strong> <span id="dp-confirm-email" style="color:var(--blue-dark); font-weight:700;"></span>
+      </div>
+      <p style="font-size:14px; line-height:1.7; margin-bottom:10px;">
+        <strong>Si la ventana de Gmail sigue abierta, envía el correo y ciérrala.</strong>
+      </p>
+      <div style="background:var(--yellow-light); border:1px solid var(--yellow); border-radius:8px; padding:10px 14px; margin-bottom:18px; font-size:13px; color:var(--gray-700);">
+        El PQRS <strong>no cambia de estado</strong> hasta que confirmes el envío. Si no lo enviaste, quedará en Correos Pendientes.
+      </div>
+      <div class="modal-actions" style="flex-direction:column; gap:8px;">
+        <button class="btn btn-success" onclick="confirmarDespachoEnviado()">✅ Sí, lo envié — pasar a En Proceso</button>
+        <button class="btn btn-ghost" onclick="reintentarDespacho()">📧 Reintentar — abrir Gmail de nuevo</button>
+        <button class="btn btn-ghost" onclick="cancelarDespachoCorreo()" style="color:var(--gray-700);">📥 No lo envié — dejar en Correos Pendientes</button>
+      </div>
     </div>
   </div>
 </div>
@@ -1236,31 +1288,6 @@ textarea { resize: vertical; min-height: 80px; }
       <button class="btn btn-success" onclick="confirmarEnvioRealizado()">
         ✅ Sí lo envié · Marcar como Proceso
       </button>
-    </div>
-  </div>
-</div>
-
-<!-- ════════ MODAL CONFIRMACIÓN CORREO SEGUIMIENTO ════════ -->
-<div class="overlay" id="modal-seg-confirm-email">
-  <div class="modal" style="max-width:480px;">
-    <div style="text-align:center; font-size:44px; margin-bottom:8px;">📧</div>
-    <h3 style="text-align:center; margin-bottom:14px;">¿Enviaste el correo?</h3>
-    <div style="background:var(--blue-light); border-radius:8px; padding:10px 14px; margin-bottom:14px; font-size:13px; line-height:1.6;">
-      <strong>Para:</strong> <span id="modal-seg-email-nombre" style="font-weight:600;"></span><br>
-      <strong>Correo:</strong> <span id="modal-seg-email-dest" style="color:var(--blue-dark); font-weight:700;"></span>
-    </div>
-    <p style="font-size:14px; line-height:1.7; margin-bottom:10px;">
-      Se abrió Gmail con el correo listo para enviar.<br>
-      <strong>Si la ventana sigue abierta, envía el correo y ciérrala.</strong>
-    </p>
-    <div style="background:var(--yellow-light); border:1px solid var(--yellow); border-radius:8px; padding:10px 14px; margin-bottom:18px; font-size:13px; color:var(--gray-700);">
-      Regresa aquí y confirma si lograste enviarlo. El seguimiento solo se guarda si confirmas.
-    </div>
-    <div class="modal-actions" style="flex-direction:column; gap:8px;">
-      <button class="btn btn-primary" onclick="confirmarSegCorreoEnviado()">✅ Sí, lo envié — guardar seguimiento</button>
-      <button class="btn btn-ghost" onclick="reintentarSegCorreo()">📧 Reintentar — abrir Gmail de nuevo</button>
-      <button class="btn btn-ghost" onclick="guardarSegSinCorreo()" style="color:var(--gray-700);">💾 Guardar seguimiento sin enviar correo</button>
-      <button class="btn btn-ghost" onclick="cancelarSegCorreo()" style="color:var(--red);">✖ Cancelar — no guardar nada</button>
     </div>
   </div>
 </div>
@@ -1386,6 +1413,8 @@ let _despachoId = null;
 let _confirmEnvioId = null;
 let _pendingSegSol = null;
 let _pendingSegSeguimiento = null;
+let _pendingDespachoId = null;
+let _pendingDespachoGmailUrl = null;
 let _currentUser = null;
 let _authToken = '';
 let _googleAccessToken = ''; // access_token de login (openid email profile) — identidad
@@ -2098,11 +2127,16 @@ function guardarSolicitud() {
 }
 
 function noEnviarCorreo() {
-  if(_pendingSolicitud) {
-    _pendingSolicitud.emailPendiente = true;
+  const sol = _pendingSolicitud;
+  if(sol) {
+    sol.emailPendiente = true;
     pushToSheets();
     updateBadge();
-    toast('Solicitud guardada correctamente. El correo fue agregado a pendientes.', 'warn');
+    toast('Solicitud guardada. El correo al área quedó en pendientes.', 'warn');
+    if(sol.correo) {
+      const seg = { fecha: new Date().toISOString().slice(0,10), respuesta: '', estado: 'Abierto' };
+      sendResponseEmail(sol, seg, true, 'despacho').catch(e => { if(e.message !== 'TOKEN_EXPIRED') console.warn('correo sol:', e.message); });
+    }
   }
   _cerrarModalGuardar();
 }
@@ -2142,7 +2176,11 @@ function confirmarCorreoEnviado() {
     sol.emailPendiente = false;
     pushToSheets();
     updateBadge();
-    toast('✅ Correo confirmado. Estado actualizado a "En Proceso".', 'success');
+    toast('✅ Correo al área confirmado. Estado actualizado a "En Proceso".', 'success');
+    if(sol.correo) {
+      const seg = { fecha: new Date().toISOString().slice(0,10), respuesta: '', estado: 'Proceso' };
+      sendResponseEmail(sol, seg, true, 'despacho').catch(e => { if(e.message !== 'TOKEN_EXPIRED') console.warn('correo sol:', e.message); });
+    }
   }
   _cerrarModalGuardar();
 }
@@ -2153,7 +2191,11 @@ function noSeEnvioCorreo() {
     sol.emailPendiente = true;
     pushToSheets();
     updateBadge();
-    toast('Correo guardado en pendientes. Puedes enviarlo desde "Correos Pendientes" cuando lo desees.', 'warn');
+    toast('Correo al área en pendientes. Puedes enviarlo desde "Correos Pendientes" cuando lo desees.', 'warn');
+    if(sol.correo) {
+      const seg = { fecha: new Date().toISOString().slice(0,10), respuesta: '', estado: 'Abierto' };
+      sendResponseEmail(sol, seg, true, 'despacho').catch(e => { if(e.message !== 'TOKEN_EXPIRED') console.warn('correo sol:', e.message); });
+    }
   }
   _cerrarModalGuardar();
 }
@@ -2337,6 +2379,12 @@ function abrirEnvio(id) {
   });
   depSel.value = sol.dependencia || '';
 
+  // Siempre iniciar en la vista del formulario (no en la de confirmación)
+  document.getElementById('modal-despacho-form-view').style.display = '';
+  document.getElementById('modal-despacho-confirm-view').style.display = 'none';
+  _pendingDespachoId = null;
+  _pendingDespachoGmailUrl = null;
+
   openModal('modal-despacho');
 }
 
@@ -2367,7 +2415,7 @@ async function enviarSolicitud(sendNow) {
   const dep = document.getElementById('dp-dependencia').value;
   if(!dep) { toast('Por favor selecciona el área responsable para continuar.', 'error'); document.getElementById('dp-dependencia').focus(); return; }
 
-  // Aplicar datos editados
+  // Aplicar datos editados en memoria
   sol.nombre            = document.getElementById('dp-nombre').value || sol.nombre;
   sol.correo            = document.getElementById('dp-correo').value || sol.correo;
   sol.telefono          = document.getElementById('dp-telefono').value || sol.telefono;
@@ -2378,52 +2426,117 @@ async function enviarSolicitud(sendNow) {
   sol.requiereRespuesta = document.getElementById('dp-requiere').value || sol.requiereRespuesta;
   sol.descripcion       = document.getElementById('dp-descripcion').value || sol.descripcion;
   sol.dependencia       = dep;
-  sol.leido             = true; // marcar como leída → desaparece de bandeja
+  sol.leido             = true;
 
-  // Si viene de Forms, marcar la fila en la hoja Forms para que no reaparezca
   if(sol.origenForms) {
     markFormsRowAsRevisado(sol.formsKey || sol.createdAt);
   }
 
-  if(sendNow) {
-    const emailArea = DB.config.emailAreas[dep] || '';
-    const subject = encodeURIComponent(`[PQRS] ${sol.id} - ${sol.tipoSolicitud} - ${dep}`);
-    const body    = encodeURIComponent(buildEmailBody(sol));
-    const gmailUrl = emailArea
-      ? `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(emailArea)}&su=${subject}&body=${body}`
-      : `https://mail.google.com/mail/?view=cm&fs=1&su=${subject}&body=${body}`;
-    window.open(gmailUrl, '_blank');
-    sol.estado         = 'Proceso';
-    sol.emailPendiente = false;
-    toast(`✅ Solicitud ${sol.id} enviada al área. Correo abierto en Gmail → Estado: En Proceso.`, 'success');
-  } else {
-    // Dejar abierto: pasa a Abierto con correo pendiente
+  if(!sendNow) {
+    // Dejar abierto: guardar inmediatamente con correo pendiente al área
     sol.estado         = 'Abierto';
     sol.emailPendiente = true;
-    toast(`✅ Solicitud ${sol.id} asignada al equipo de "${dep}". La notificación está en Correos Pendientes.`, 'success');
+    const ahora = new Date().toISOString();
+    sol.seguimientos = sol.seguimientos || [];
+    const segDep = {
+      fecha: ahora.slice(0,10),
+      respuesta: `Solicitud asignada al equipo de "${dep}". La notificación al área está pendiente de envío.`,
+      estado: 'Abierto', registradoEn: ahora, tipo: 'despacho',
+      autor: (_currentUser && _currentUser.nombre) ? _currentUser.nombre : 'Secretaría',
+      segKey: ahora
+    };
+    sol.seguimientos.push(segDep);
+    await pushToSheets();
+    closeModal('modal-despacho');
+    renderBandeja(); renderDashboard(); renderCorreos(); renderSeguimiento(); updateBadge();
+    toast(`✅ Solicitud ${sol.id} asignada al equipo de "${dep}". La notificación al área está en Correos Pendientes.`, 'success');
+    // Notificar al solicitante que su caso fue recibido y asignado
+    if(sol.correo) {
+      sendResponseEmail(sol, segDep, true, 'despacho').then(() => {
+        toast(`📧 Confirmación enviada a ${sol.correo}.`, 'success');
+      }).catch(e => { if(e.message !== 'TOKEN_EXPIRED') console.warn('correo sol:', e.message); });
+    }
+    return;
   }
 
-  // Registrar evento de despacho en la línea de tiempo
-  const _ahoraDespacho = new Date().toISOString();
+  // sendNow=true: abrir Gmail y esperar confirmación — NO cambiar estado todavía
+  const emailArea = DB.config.emailAreas[dep] || '';
+  const subject = encodeURIComponent(`[PQRS] ${sol.id} - ${sol.tipoSolicitud} - ${dep}`);
+  const body    = encodeURIComponent(buildEmailBody(sol));
+  const gmailUrl = emailArea
+    ? `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(emailArea)}&su=${subject}&body=${body}`
+    : `https://mail.google.com/mail/?view=cm&fs=1&su=${subject}&body=${body}`;
+
+  _pendingDespachoId = sol.id;
+  _pendingDespachoGmailUrl = gmailUrl;
+  window.open(gmailUrl, '_blank');
+
+  // Mostrar vista de confirmación dentro del mismo modal
+  document.getElementById('dp-confirm-area').textContent = dep;
+  document.getElementById('dp-confirm-email').textContent = emailArea || '(sin correo configurado para esta área)';
+  document.getElementById('modal-despacho-form-view').style.display = 'none';
+  document.getElementById('modal-despacho-confirm-view').style.display = '';
+}
+
+function reintentarDespacho() {
+  if (!_pendingDespachoGmailUrl) return;
+  window.open(_pendingDespachoGmailUrl, '_blank');
+}
+
+async function confirmarDespachoEnviado() {
+  const id = _pendingDespachoId;
+  _pendingDespachoId = null;
+  _pendingDespachoGmailUrl = null;
+  _resetModalDespachoViews();
+  const sol = DB.solicitudes.find(s => s.id === id);
+  if (!sol) { closeModal('modal-despacho'); return; }
+  sol.estado = 'Proceso';
+  sol.emailPendiente = false;
+  const ahora = new Date().toISOString();
   sol.seguimientos = sol.seguimientos || [];
-  sol.seguimientos.push({
-    fecha: _ahoraDespacho.slice(0, 10),
-    respuesta: sendNow
-      ? `Solicitud asignada al equipo de "${dep}" para su gestión. El solicitante fue notificado oportunamente.`
-      : `Solicitud asignada al equipo de "${dep}". La notificación al área está pendiente de envío.`,
-    estado: sendNow ? 'Proceso' : 'Abierto',
-    registradoEn: _ahoraDespacho,
-    tipo: 'despacho',
+  const segDespacho = {
+    fecha: ahora.slice(0,10),
+    respuesta: `Solicitud asignada al equipo de "${sol.dependencia}" para su gestión. El área fue notificada por correo.`,
+    estado: 'Proceso', registradoEn: ahora, tipo: 'despacho',
     autor: (_currentUser && _currentUser.nombre) ? _currentUser.nombre : 'Secretaría',
-    segKey: _ahoraDespacho
-  });
+    segKey: ahora
+  };
+  sol.seguimientos.push(segDespacho);
   await pushToSheets();
   closeModal('modal-despacho');
-  renderBandeja();
-  renderDashboard();
-  renderCorreos();
-  renderSeguimiento();
-  updateBadge();
+  renderBandeja(); renderDashboard(); renderCorreos(); renderSeguimiento(); updateBadge();
+  toast(`✅ Correo al área enviado. Solicitud ${id} pasa a "En Proceso".`, 'success');
+  // Notificar al solicitante que su caso fue asignado al área
+  if(sol.correo) {
+    sendResponseEmail(sol, segDespacho, true, 'despacho').then(() => {
+      toast(`📧 Confirmación enviada a ${sol.correo}.`, 'success');
+    }).catch(e => { if(e.message !== 'TOKEN_EXPIRED') console.warn('correo sol despacho:', e.message); });
+  }
+}
+
+async function cancelarDespachoCorreo() {
+  const id = _pendingDespachoId;
+  _pendingDespachoId = null;
+  _pendingDespachoGmailUrl = null;
+  _resetModalDespachoViews();
+  const sol = DB.solicitudes.find(s => s.id === id);
+  if (sol) {
+    sol.emailPendiente = true;
+    await pushToSheets();
+    // El área no fue notificada aún, pero el solicitante sí debe saber que su caso fue recibido
+    if(sol.correo) {
+      const seg = { fecha: new Date().toISOString().slice(0,10), respuesta: '', estado: sol.estado };
+      sendResponseEmail(sol, seg, true, 'despacho').catch(e => { if(e.message !== 'TOKEN_EXPIRED') console.warn('correo sol:', e.message); });
+    }
+  }
+  closeModal('modal-despacho');
+  renderBandeja(); renderDashboard(); renderCorreos(); renderSeguimiento(); updateBadge();
+  toast('Correo al área no enviado. La solicitud quedó en Correos Pendientes.', 'warn');
+}
+
+function _resetModalDespachoViews() {
+  document.getElementById('modal-despacho-form-view').style.display = '';
+  document.getElementById('modal-despacho-confirm-view').style.display = 'none';
 }
 
 async function rechazarBorrador(id) {
@@ -2493,8 +2606,25 @@ async function enviarObsAreaEmail(sendNow) {
       toast('Error al enviar: ' + (data?.error || 'Error desconocido'), 'error');
       return;
     }
+    // Registrar en la línea de tiempo que la observación fue enviada al área.
+    // Esto hace que hasUnresolvedObs sea false → el botón desaparece al re-renderizar.
+    const ahora = new Date().toISOString();
+    const autor  = (_currentUser && _currentUser.nombre) ? _currentUser.nombre : 'Secretaría';
+    if (!sol.seguimientos) sol.seguimientos = [];
+    sol.seguimientos.push({
+      fecha:        ahora.slice(0, 10),
+      respuesta:    `Observación del solicitante enviada al área "${dep}" para su atención.`,
+      estado:       sol.estado,
+      registradoEn: ahora,
+      tipo:         'obs_enviada_area',
+      autor:        autor,
+      segKey:       ahora
+    });
+    await pushToSheets();
+    renderSeguimiento();
+    renderDashboard();
     const via = data.via === 'gmail_api' ? ' (desde su cuenta)' : '';
-    toast(`✅ Observación enviada al equipo de "${dep}"${via}. Esperamos su respuesta pronto en la app.`, 'success');
+    toast(`✅ Observación enviada al equipo de "${dep}"${via}. Quedó registrado en la línea de tiempo.`, 'success');
     closeModal('modal-obs-area');
   } catch(ex) {
     toast('Error de conexión al enviar la observación: ' + ex.message, 'error');
@@ -2599,8 +2729,13 @@ let _areaSegIdx = null; // índice del seguimiento de área que se está aproban
 function cerrarModalSeg() {
   _guardandoSeguimiento = false;
   _areaSegIdx = null;
+  _pendingSegSol = null;
+  _pendingSegSeguimiento = null;
   const btn = document.getElementById('btn-guardar-seg');
   if(btn) { btn.disabled = false; btn.innerHTML = '💾 Guardar Seguimiento'; }
+  document.getElementById('modal-seg-form-view').style.display = '';
+  document.getElementById('modal-seg-email-view').style.display = 'none';
+  document.getElementById('modal-seg-titulo').textContent = '📝 Registrar Seguimiento';
   closeModal('modal-seg');
 }
 
@@ -2630,7 +2765,7 @@ function abrirSeguimientoDesdeArea(id, segIdx) {
     const sel = document.getElementById('seg-estado-nuevo');
     if (ta)  ta.value  = seg.respuesta;
     if (sel) sel.value = 'Proceso';
-    document.getElementById('modal-seg').querySelector('h3').textContent = '📋 Revisar y aprobar respuesta del área';
+    document.getElementById('modal-seg-titulo').textContent = '📋 Revisar y aprobar respuesta del área';
   }, 60);
 }
 
@@ -2646,24 +2781,44 @@ async function guardarSeguimiento() {
   if(!sol) return;
 
   const ahora = new Date().toISOString();
-  const seguimiento = { fecha, respuesta, estado: nuevoEstado, registradoEn: ahora, tipo: 'secretaria', autor: 'Secretaría', segKey: ahora };
+  const autor = (_currentUser && _currentUser.nombre) ? _currentUser.nombre : 'Secretaría';
+  const seguimiento = { fecha, respuesta, estado: nuevoEstado, registradoEn: ahora, tipo: 'secretaria', autor, segKey: ahora };
 
-  if (sol.correo) {
-    // Abrir Gmail compose con el correo de respuesta pre-listo
-    const subject = encodeURIComponent(`[Colegio Goyavier] Tenemos novedades sobre tu solicitud · ${sol.id}`);
-    const body = encodeURIComponent(buildResponseEmailBody(sol, seguimiento));
-    const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(sol.correo)}&su=${subject}&body=${body}`;
-    // Guardar datos pendientes para usarlos tras la confirmación
-    _pendingSegSol = sol;
-    _pendingSegSeguimiento = seguimiento;
-    window.open(gmailUrl, '_blank');
-    // Mostrar modal de confirmación — el seguimiento NO se guarda hasta que el usuario confirme
-    document.getElementById('modal-seg-email-nombre').textContent = sol.nombre || '';
-    document.getElementById('modal-seg-email-dest').textContent = sol.correo;
-    openModal('modal-seg-confirm-email');
-  } else {
-    // Sin correo — guardar directamente sin pasar por Gmail
-    await _ejecutarGuardarSeguimiento(sol, seguimiento, false);
+  _guardandoSeguimiento = true;
+  const btn = document.getElementById('btn-guardar-seg');
+  if(btn) { btn.disabled = true; btn.innerHTML = '⏳ Guardando...'; }
+  try {
+    if(!sol.seguimientos) sol.seguimientos = [];
+    sol.seguimientos.push(seguimiento);
+    sol.estado = seguimiento.estado;
+    if(_areaSegIdx !== null && sol.seguimientos[_areaSegIdx]) {
+      sol.seguimientos[_areaSegIdx].tipo = 'aprobada';
+    }
+    _areaSegIdx = null;
+    await pushToSheets();
+    closeModal('modal-seg');
+    renderSeguimiento(); renderDashboard(); renderHistorial(); updateBadge();
+
+    if(sol.correo) {
+      // Enviar via GAS API: genera y almacena el token, lo incluye en el link de respuesta
+      try {
+        await sendResponseEmail(sol, seguimiento);
+        toast(`✅ Seguimiento guardado y correo enviado a ${sol.correo}.`, 'success');
+      } catch(emailErr) {
+        if(emailErr.message !== 'TOKEN_EXPIRED') {
+          toast(`✅ Seguimiento guardado. No se pudo enviar el correo: ${emailErr.message}`, 'warn');
+        }
+      }
+    } else {
+      toast('✅ Seguimiento registrado. Sin correo registrado, no se envió notificación.', 'success');
+    }
+  } catch(e) {
+    sol.seguimientos && sol.seguimientos.pop();
+    sol.estado = sol.seguimientos && sol.seguimientos.length ? sol.seguimientos[sol.seguimientos.length-1].estado : 'Abierto';
+    toast('Ocurrió un error al guardar el seguimiento. Por favor intenta de nuevo.', 'error');
+  } finally {
+    _guardandoSeguimiento = false;
+    if(btn) { btn.disabled = false; btn.innerHTML = '💾 Guardar Seguimiento'; }
   }
 }
 
@@ -2700,9 +2855,10 @@ async function _ejecutarGuardarSeguimiento(sol, seguimiento, correoEnviado) {
 }
 
 async function confirmarSegCorreoEnviado() {
-  closeModal('modal-seg-confirm-email');
   const sol = _pendingSegSol; const seg = _pendingSegSeguimiento;
   _pendingSegSol = null; _pendingSegSeguimiento = null;
+  document.getElementById('modal-seg-form-view').style.display = '';
+  document.getElementById('modal-seg-email-view').style.display = 'none';
   if (!sol || !seg) return;
   await _ejecutarGuardarSeguimiento(sol, seg, true);
 }
@@ -2718,9 +2874,10 @@ function reintentarSegCorreo() {
 }
 
 async function guardarSegSinCorreo() {
-  closeModal('modal-seg-confirm-email');
   const sol = _pendingSegSol; const seg = _pendingSegSeguimiento;
   _pendingSegSol = null; _pendingSegSeguimiento = null;
+  document.getElementById('modal-seg-form-view').style.display = '';
+  document.getElementById('modal-seg-email-view').style.display = 'none';
   if (!sol || !seg) return;
   await _ejecutarGuardarSeguimiento(sol, seg, false);
 }
@@ -2728,7 +2885,8 @@ async function guardarSegSinCorreo() {
 function cancelarSegCorreo() {
   _pendingSegSol = null;
   _pendingSegSeguimiento = null;
-  closeModal('modal-seg-confirm-email');
+  document.getElementById('modal-seg-form-view').style.display = '';
+  document.getElementById('modal-seg-email-view').style.display = 'none';
   toast('Envío cancelado. El seguimiento no fue guardado.', 'warn');
 }
 
@@ -2802,7 +2960,12 @@ function confirmarEnvioRealizado() {
     renderCorreos();
     renderDashboard();
     renderSeguimiento();
-    toast(`✅ Correo de ${sol.id} marcado como enviado. Estado actualizado a: En Proceso.`, 'success');
+    toast(`✅ Correo al área de ${sol.id} marcado como enviado. Estado: En Proceso.`, 'success');
+    // Notificar al solicitante que su caso fue asignado y está en gestión
+    if(sol.correo) {
+      const seg = { fecha: new Date().toISOString().slice(0,10), respuesta: '', estado: 'Proceso' };
+      sendResponseEmail(sol, seg, true, 'despacho').catch(e => { if(e.message !== 'TOKEN_EXPIRED') console.warn('correo sol:', e.message); });
+    }
   }
   document.getElementById('modal-confirm-envio').classList.remove('open');
   _confirmEnvioId = null;
@@ -3196,9 +3359,11 @@ function onFormSubmit(e) {
       : [];
     const fVals = e.values || [];
 
-    // get(): 3 niveles — exacto en namedValues → normalizado en namedValues → por header+posición en hoja Forms
+    // get(fallbackIdx, ...keys): 3 niveles — exacto en namedValues → normalizado en namedValues
+    // → por header en hoja Forms → fallback por posición de columna (fallbackIdx).
+    // Los índices de posición deben coincidir con getData() y con el orden real del formulario.
     const normKey_ = s => String(s).normalize('NFD').replace(/[\\u0300-\\u036f]/g,'').toLowerCase().trim();
-    const get = (...keys) => {
+    const get = (fallbackIdx, ...keys) => {
       for(const k of keys) { if(r[k] && r[k][0].trim()) return r[k][0].trim(); }
       for(const k of keys) {
         const nk = normKey_(k);
@@ -3206,20 +3371,22 @@ function onFormSubmit(e) {
           if(normKey_(rk) === nk && rv && rv[0].trim()) return rv[0].trim();
         }
       }
-      return getFormValue_(fHeaders, fVals, keys, -1);
+      return getFormValue_(fHeaders, fVals, keys, fallbackIdx);
     };
 
     const formTimestamp = e.values && e.values[0] instanceof Date ? e.values[0].toISOString() : new Date().toISOString();
     const fecha      = formTimestamp.slice(0, 10);
     const id         = generarId(sheet);
-    const nombre     = get('Nombre completo', 'Nombre', 'Nombres', 'Nombre del solicitante', 'Nombre y apellidos');
-    const correo     = get('Correo electrónico', 'Correo electronico', 'Correo', 'Email', 'E-mail');
-    const telefono   = get('Teléfono', 'Telefono', 'Celular', 'Móvil', 'Movil', 'Tel');
-    const estudiante = get('Nombre del estudiante', 'Estudiante', 'Nombre estudiante', 'Nombre del hijo', 'Nombre del hijo/a');
-    const tiposol    = get('Tipo de solicitud', 'Tipo de Solicitud', 'Tipo PQRS', 'Tipo', 'Categoría', 'Categoria');
-    const requiere   = get('Requiere respuesta', 'Requiere Respuesta') || 'Si';
-    const descripcion= get('Descripción de la solicitud', 'Descripcion de la solicitud', 'Descripción', 'Descripcion', 'Mensaje', 'Detalle', 'Detalle de la solicitud', 'Su solicitud');
-    const grado      = get('Grado', 'Grado del estudiante', 'Curso', 'Grado/Curso', 'Grado o curso');
+    // Índices de columna coinciden con getData(): col A(0)=Timestamp, B(1)=Nombre, C(2)=Correo,
+    // D(3)=Telefono, E(4)=Estudiante, F(5)=TipoSolicitud, G(6)=Requiere, H(7)=Descripcion, I(8)=Grado
+    const nombre     = get(1, 'Nombre completo', 'Nombre', 'Nombres', 'Nombre del solicitante', 'Nombre y apellidos');
+    const correo     = get(2, 'Correo electrónico', 'Correo electronico', 'Correo', 'Email', 'E-mail');
+    const telefono   = get(3, 'Teléfono', 'Telefono', 'Celular', 'Móvil', 'Movil', 'Tel');
+    const estudiante = get(4, 'Nombre del estudiante', 'Estudiante', 'Nombre estudiante', 'Nombre del hijo', 'Nombre del hijo/a');
+    const tiposol    = get(5, 'Tipo de solicitud', 'Tipo de Solicitud', 'Tipo PQRS', 'Tipo', 'Categoría', 'Categoria');
+    const requiere   = get(6, 'Requiere respuesta', 'Requiere Respuesta') || 'Si';
+    const descripcion= get(7, 'Descripción de la solicitud', 'Descripcion de la solicitud', 'Descripción', 'Descripcion', 'Mensaje', 'Detalle', 'Detalle de la solicitud', 'Su solicitud');
+    const grado      = get(8, 'Grado', 'Grado del estudiante', 'Curso', 'Grado/Curso', 'Grado o curso');
     const medio      = 'Forms';
 
     // Generar un ID único estable (UUID) para esta fila del formulario
@@ -3256,6 +3423,29 @@ function onFormSubmit(e) {
     const asunto = '[PQRS Goyavier] Nueva solicitud desde Forms · ' + id;
     const cuerpo = 'Nueva solicitud PQRS desde el formulario web.\\n\\nID: ' + id + '\\nFecha: ' + fecha + '\\nTipo: ' + tiposol + '\\nNombre: ' + nombre + '\\nEstudiante: ' + estudiante + '\\nGrado: ' + grado + '\\nDescripción: ' + descripcion;
     GmailApp.sendEmail(EMAIL_RESP, asunto, cuerpo);
+
+    // Enviar confirmación de recibo al solicitante
+    if (correo) {
+      try {
+        const asuntoSolic = '[Colegio Goyavier] Recibimos tu solicitud PQRS · ' + id;
+        const cuerpoSolic =
+          'Hola, ' + nombre + '.\\n\\n' +
+          'Hemos recibido correctamente tu solicitud PQRS. A continuación el detalle de tu radicado:\\n\\n' +
+          'Número de solicitud : ' + id + '\\n' +
+          'Fecha               : ' + fecha + '\\n' +
+          'Tipo de solicitud   : ' + tiposol + '\\n' +
+          'Estudiante          : ' + (estudiante || '-') + '\\n' +
+          'Grado               : ' + (grado || '-') + '\\n\\n' +
+          'Descripción:\\n' + descripcion + '\\n\\n' +
+          'Nuestro equipo revisará tu solicitud y te contactará a la brevedad. ' +
+          'Cuando tengamos una respuesta oficial, te la haremos llegar a este mismo correo.\\n\\n' +
+          'Gracias por confiar en el Colegio Goyavier Campestre.\\n\\n' +
+          'Con atención,\\nEquipo PQRS · Colegio Goyavier Campestre';
+        GmailApp.sendEmail(correo, asuntoSolic, cuerpoSolic, {name: 'PQRS Colegio Goyavier', replyTo: EMAIL_RESP});
+      } catch(mailSolicErr) {
+        Logger.log('Error correo confirmación solicitante: ' + mailSolicErr.message);
+      }
+    }
   } catch(err) {
     Logger.log('Error onFormSubmit: ' + err.message);
   }
@@ -3618,7 +3808,8 @@ function syncData(solicitudes) {
       segSheet.getRange(1, skc).setValue('SegKey').setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
     }
   }
-  if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow()-1, Math.max(sheet.getLastColumn(), headers.length)).clearContent();
+  // Solo limpiar columnas estándar — las dinámicas (p.ej. TokenRespuesta) quedan intactas
+  if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow()-1, headers.length).clearContent();
   if (segSheet.getLastRow() > 1) segSheet.getRange(2, 1, segSheet.getLastRow()-1, Math.max(segSheet.getLastColumn(), segHeaders.length)).clearContent();
   solicitudes.forEach((s, i) => {
     sheet.getRange(i+2, 1, 1, headers.length).setValues([[
@@ -3626,7 +3817,8 @@ function syncData(solicitudes) {
       s.tipoSolicitud||'', s.medioRecepcion||'', s.requiereRespuesta||'',
       s.descripcion||'', s.estado||'Borrador', s.emailPendiente ? 'TRUE' : 'FALSE',
       s.createdAt||'', s.origenForms ? 'TRUE' : 'FALSE',
-      s.observacionSolicitante||'', s.fechaObservacion||'', s.formsKey||''
+      s.observacionSolicitante||'', s.fechaObservacion||'', s.formsKey||'',
+      s.calificacion||''
     ]]);
   });
   let segRow = 2;
@@ -3654,13 +3846,22 @@ function sendEmailFromParams_(p) {
     : contexto === 'respuestaObservacion'
       ? '[Colegio Goyavier] Revisamos tu observación — nueva respuesta · ' + p.id
       : '[Colegio Goyavier] Tenemos novedades sobre tu solicitud · ' + p.id;
-  const enlaceRespuesta = ScriptApp.getService().getUrl() + '?action=responder&id=' + encodeURIComponent(p.id);
-  const bloqueEnlace = sinEnlace ? '' :
-    '──────────────────────────────────────────\\n' +
-    'Cuéntanos cómo te fue. Haz clic en el siguiente enlace para\\n' +
-    'confirmar si tu caso fue resuelto o para registrar una observación:\\n' +
-    enlaceRespuesta + '\\n' +
-    '──────────────────────────────────────────\\n\\n';
+  var tkn = '';
+  var enlaceRespuesta = '';
+  var bloqueEnlace = '';
+  if (!sinEnlace) {
+    tkn = Utilities.getUuid();
+    _actualizarTokenRespuesta_(p.id, tkn);
+    enlaceRespuesta = ScriptApp.getService().getUrl() +
+      '?action=responder&id=' + encodeURIComponent(p.id) +
+      '&tkn=' + encodeURIComponent(tkn);
+    bloqueEnlace =
+      '──────────────────────────────────────────\\n' +
+      'Cuéntanos cómo te fue. Haz clic en el siguiente enlace para\\n' +
+      'confirmar si tu caso fue resuelto o para registrar una observación:\\n' +
+      enlaceRespuesta + '\\n' +
+      '──────────────────────────────────────────\\n\\n';
+  }
   var intro, detalle, cierre;
   if (contexto === 'despacho') {
     intro =
@@ -4310,9 +4511,10 @@ function ensureHeaders(sheet) {
   const headers = getHeaders();
   if (sheet.getLastRow() === 0) {
     sheet.appendRow(headers);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
+    return;
   }
-  const maxCols = Math.max(sheet.getLastColumn(), headers.length);
-  sheet.getRange(1, 1, 1, maxCols).clearContent();
+  // Solo actualiza columnas estándar — NO borra columnas dinámicas extra (p.ej. TokenRespuesta)
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
 }
 

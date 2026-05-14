@@ -44,9 +44,11 @@ function onFormSubmit(e) {
       : [];
     const fVals = e.values || [];
 
-    // get(): 3 niveles — exacto en namedValues → normalizado en namedValues → por header+posición en hoja Forms
+    // get(fallbackIdx, ...keys): 3 niveles — exacto en namedValues → normalizado en namedValues
+    // → por header en hoja Forms → fallback por posición de columna (fallbackIdx).
+    // Los índices de posición deben coincidir con getData() y con el orden real del formulario.
     const normKey_ = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
-    const get = (...keys) => {
+    const get = (fallbackIdx, ...keys) => {
       for(const k of keys) { if(r[k] && r[k][0].trim()) return r[k][0].trim(); }
       for(const k of keys) {
         const nk = normKey_(k);
@@ -54,20 +56,22 @@ function onFormSubmit(e) {
           if(normKey_(rk) === nk && rv && rv[0].trim()) return rv[0].trim();
         }
       }
-      return getFormValue_(fHeaders, fVals, keys, -1);
+      return getFormValue_(fHeaders, fVals, keys, fallbackIdx);
     };
 
     const formTimestamp = e.values && e.values[0] instanceof Date ? e.values[0].toISOString() : new Date().toISOString();
     const fecha      = formTimestamp.slice(0, 10);
     const id         = generarId(sheet);
-    const nombre     = get('Nombre completo', 'Nombre', 'Nombres', 'Nombre del solicitante', 'Nombre y apellidos');
-    const correo     = get('Correo electrónico', 'Correo electronico', 'Correo', 'Email', 'E-mail');
-    const telefono   = get('Teléfono', 'Telefono', 'Celular', 'Móvil', 'Movil', 'Tel');
-    const estudiante = get('Nombre del estudiante', 'Estudiante', 'Nombre estudiante', 'Nombre del hijo', 'Nombre del hijo/a');
-    const tiposol    = get('Tipo de solicitud', 'Tipo de Solicitud', 'Tipo PQRS', 'Tipo', 'Categoría', 'Categoria');
-    const requiere   = get('Requiere respuesta', 'Requiere Respuesta') || 'Si';
-    const descripcion= get('Descripción de la solicitud', 'Descripcion de la solicitud', 'Descripción', 'Descripcion', 'Mensaje', 'Detalle', 'Detalle de la solicitud', 'Su solicitud');
-    const grado      = get('Grado', 'Grado del estudiante', 'Curso', 'Grado/Curso', 'Grado o curso');
+    // Índices de columna coinciden con getData(): col A(0)=Timestamp, B(1)=Nombre, C(2)=Correo,
+    // D(3)=Telefono, E(4)=Estudiante, F(5)=TipoSolicitud, G(6)=Requiere, H(7)=Descripcion, I(8)=Grado
+    const nombre     = get(1, 'Nombre completo', 'Nombre', 'Nombres', 'Nombre del solicitante', 'Nombre y apellidos');
+    const correo     = get(2, 'Correo electrónico', 'Correo electronico', 'Correo', 'Email', 'E-mail');
+    const telefono   = get(3, 'Teléfono', 'Telefono', 'Celular', 'Móvil', 'Movil', 'Tel');
+    const estudiante = get(4, 'Nombre del estudiante', 'Estudiante', 'Nombre estudiante', 'Nombre del hijo', 'Nombre del hijo/a');
+    const tiposol    = get(5, 'Tipo de solicitud', 'Tipo de Solicitud', 'Tipo PQRS', 'Tipo', 'Categoría', 'Categoria');
+    const requiere   = get(6, 'Requiere respuesta', 'Requiere Respuesta') || 'Si';
+    const descripcion= get(7, 'Descripción de la solicitud', 'Descripcion de la solicitud', 'Descripción', 'Descripcion', 'Mensaje', 'Detalle', 'Detalle de la solicitud', 'Su solicitud');
+    const grado      = get(8, 'Grado', 'Grado del estudiante', 'Curso', 'Grado/Curso', 'Grado o curso');
     const medio      = 'Forms';
 
     // Generar un ID único estable (UUID) para esta fila del formulario
@@ -102,8 +106,31 @@ function onFormSubmit(e) {
     });
     sheet.appendRow(rowData);
     const asunto = '[PQRS Goyavier] Nueva solicitud desde Forms · ' + id;
-    const cuerpo = 'Nueva solicitud PQRS desde el formulario web.\\n\\nID: ' + id + '\\nFecha: ' + fecha + '\\nTipo: ' + tiposol + '\\nNombre: ' + nombre + '\\nEstudiante: ' + estudiante + '\\nGrado: ' + grado + '\\nDescripción: ' + descripcion;
+    const cuerpo = 'Nueva solicitud PQRS desde el formulario web.\n\nID: ' + id + '\nFecha: ' + fecha + '\nTipo: ' + tiposol + '\nNombre: ' + nombre + '\nEstudiante: ' + estudiante + '\nGrado: ' + grado + '\nDescripción: ' + descripcion;
     GmailApp.sendEmail(EMAIL_RESP, asunto, cuerpo);
+
+    // Enviar confirmación de recibo al solicitante
+    if (correo) {
+      try {
+        const asuntoSolic = '[Colegio Goyavier] Recibimos tu solicitud PQRS · ' + id;
+        const cuerpoSolic =
+          'Hola, ' + nombre + '.\n\n' +
+          'Hemos recibido correctamente tu solicitud PQRS. A continuación el detalle de tu radicado:\n\n' +
+          'Número de solicitud : ' + id + '\n' +
+          'Fecha               : ' + fecha + '\n' +
+          'Tipo de solicitud   : ' + tiposol + '\n' +
+          'Estudiante          : ' + (estudiante || '-') + '\n' +
+          'Grado               : ' + (grado || '-') + '\n\n' +
+          'Descripción:\n' + descripcion + '\n\n' +
+          'Nuestro equipo revisará tu solicitud y te contactará a la brevedad. ' +
+          'Cuando tengamos una respuesta oficial, te la haremos llegar a este mismo correo.\n\n' +
+          'Gracias por confiar en el Colegio Goyavier Campestre.\n\n' +
+          'Con atención,\nEquipo PQRS · Colegio Goyavier Campestre';
+        GmailApp.sendEmail(correo, asuntoSolic, cuerpoSolic, {name: 'PQRS Colegio Goyavier', replyTo: EMAIL_RESP});
+      } catch(mailSolicErr) {
+        Logger.log('Error correo confirmación solicitante: ' + mailSolicErr.message);
+      }
+    }
   } catch(err) {
     Logger.log('Error onFormSubmit: ' + err.message);
   }
@@ -378,7 +405,8 @@ function syncData(solicitudes) {
       segSheet.getRange(1, skc).setValue('SegKey').setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
     }
   }
-  if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow()-1, Math.max(sheet.getLastColumn(), headers.length)).clearContent();
+  // Solo limpiar columnas estándar — las dinámicas (p.ej. TokenRespuesta) quedan intactas
+  if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow()-1, headers.length).clearContent();
   if (segSheet.getLastRow() > 1) segSheet.getRange(2, 1, segSheet.getLastRow()-1, Math.max(segSheet.getLastColumn(), segHeaders.length)).clearContent();
   solicitudes.forEach((s, i) => {
     sheet.getRange(i+2, 1, 1, headers.length).setValues([[
@@ -386,7 +414,8 @@ function syncData(solicitudes) {
       s.tipoSolicitud||'', s.medioRecepcion||'', s.requiereRespuesta||'',
       s.descripcion||'', s.estado||'Borrador', s.emailPendiente ? 'TRUE' : 'FALSE',
       s.createdAt||'', s.origenForms ? 'TRUE' : 'FALSE',
-      s.observacionSolicitante||'', s.fechaObservacion||'', s.formsKey||''
+      s.observacionSolicitante||'', s.fechaObservacion||'', s.formsKey||'',
+      s.calificacion||''
     ]]);
   });
   let segRow = 2;
@@ -432,9 +461,12 @@ function sendEmailFromParams_(p) {
   const googleToken   = String(p.googleToken || '').trim();
   if (!destinatario) return jsonOut({ok: false, error: 'La solicitud no tiene correo del solicitante'});
   const sinEnlace = p.sinEnlace === 'true';
+  const contexto  = String(p.contexto || 'respuesta');
   const asunto = sinEnlace
     ? '[Colegio Goyavier] Recibimos tu solicitud · ' + p.id
-    : '[Colegio Goyavier] Tenemos novedades sobre tu solicitud · ' + p.id;
+    : contexto === 'respuestaObservacion'
+      ? '[Colegio Goyavier] Revisamos tu observación — nueva respuesta · ' + p.id
+      : '[Colegio Goyavier] Tenemos novedades sobre tu solicitud · ' + p.id;
   // Cada envío genera un token único — al usarlo queda invalidado
   var tkn = '';
   var enlaceRespuesta = '';
@@ -456,7 +488,6 @@ function sendEmailFromParams_(p) {
   }
   const nombre = p.nombre || 'estimado(a) solicitante';
   const dep    = p.dependencia || 'el equipo responsable';
-  const contexto = String(p.contexto || 'respuesta');
 
   var intro, detalle, cierre;
 
@@ -1465,9 +1496,10 @@ function ensureHeaders(sheet) {
   const headers = getHeaders();
   if (sheet.getLastRow() === 0) {
     sheet.appendRow(headers);
+    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
+    return;
   }
-  const maxCols = Math.max(sheet.getLastColumn(), headers.length);
-  sheet.getRange(1, 1, 1, maxCols).clearContent();
+  // Solo actualiza columnas estándar — NO borra columnas dinámicas extra (p.ej. TokenRespuesta)
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
 }
 
