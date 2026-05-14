@@ -2418,11 +2418,6 @@ async function enviarSolicitud(sendNow) {
     segKey: _ahoraDespacho
   });
   await pushToSheets();
-  // Notificar al solicitante automáticamente cuando se despacha (sin enlace de observación)
-  if(sendNow && sol.correo) {
-    const seg = { fecha: new Date().toISOString().slice(0,10), respuesta: '', estado: 'Proceso' };
-    await sendResponseEmail(sol, seg, true, 'despacho');
-  }
   closeModal('modal-despacho');
   renderBandeja();
   renderDashboard();
