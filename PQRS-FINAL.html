@@ -1240,6 +1240,31 @@ textarea { resize: vertical; min-height: 80px; }
   </div>
 </div>
 
+<!-- ════════ MODAL CONFIRMACIÓN CORREO SEGUIMIENTO ════════ -->
+<div class="overlay" id="modal-seg-confirm-email">
+  <div class="modal" style="max-width:480px;">
+    <div style="text-align:center; font-size:44px; margin-bottom:8px;">📧</div>
+    <h3 style="text-align:center; margin-bottom:14px;">¿Enviaste el correo?</h3>
+    <div style="background:var(--blue-light); border-radius:8px; padding:10px 14px; margin-bottom:14px; font-size:13px; line-height:1.6;">
+      <strong>Para:</strong> <span id="modal-seg-email-nombre" style="font-weight:600;"></span><br>
+      <strong>Correo:</strong> <span id="modal-seg-email-dest" style="color:var(--blue-dark); font-weight:700;"></span>
+    </div>
+    <p style="font-size:14px; line-height:1.7; margin-bottom:10px;">
+      Se abrió Gmail con el correo listo para enviar.<br>
+      <strong>Si la ventana sigue abierta, envía el correo y ciérrala.</strong>
+    </p>
+    <div style="background:var(--yellow-light); border:1px solid var(--yellow); border-radius:8px; padding:10px 14px; margin-bottom:18px; font-size:13px; color:var(--gray-700);">
+      Regresa aquí y confirma si lograste enviarlo. El seguimiento solo se guarda si confirmas.
+    </div>
+    <div class="modal-actions" style="flex-direction:column; gap:8px;">
+      <button class="btn btn-primary" onclick="confirmarSegCorreoEnviado()">✅ Sí, lo envié — guardar seguimiento</button>
+      <button class="btn btn-ghost" onclick="reintentarSegCorreo()">📧 Reintentar — abrir Gmail de nuevo</button>
+      <button class="btn btn-ghost" onclick="guardarSegSinCorreo()" style="color:var(--gray-700);">💾 Guardar seguimiento sin enviar correo</button>
+      <button class="btn btn-ghost" onclick="cancelarSegCorreo()" style="color:var(--red);">✖ Cancelar — no guardar nada</button>
+    </div>
+  </div>
+</div>
+
 <!-- ════════ LOADER INICIAL ════════ -->
 <div id="app-loader" style="
   position:fixed; inset:0; z-index:9999;
@@ -1359,6 +1384,8 @@ let _currentSolicitudId = null;
 let _pendingSolicitud = null;
 let _despachoId = null;
 let _confirmEnvioId = null;
+let _pendingSegSol = null;
+let _pendingSegSeguimiento = null;
 let _currentUser = null;
 let _authToken = '';
 let _googleAccessToken = ''; // access_token de login (openid email profile) — identidad
@@ -2190,6 +2217,43 @@ Con atención y agradecimiento,
 Sistema PQRS · Colegio Goyavier Campestre`;
 }
 
+function buildResponseEmailBody(sol, seguimiento) {
+  const scriptUrl = DB.config?.scriptUrl || (typeof SCRIPT_URL !== 'undefined' ? SCRIPT_URL : '');
+  const linkRespuesta = scriptUrl + '?action=responder&id=' + encodeURIComponent(sol.id);
+  const dep    = sol.dependencia || 'el equipo responsable';
+  const nombre = sol.nombre || 'estimado(a) solicitante';
+  const esPrimera = !sol.observacionSolicitante;
+
+  const intro = esPrimera
+    ? `Hola, ${nombre}. Esperamos que te encuentres muy bien.\n\n¡Tenemos novedades sobre tu solicitud! El equipo de ${dep} ya la revisó y gestionó.\nA continuación te compartimos la respuesta oficial para tu caso.\n\n`
+    : `Hola, ${nombre}. Esperamos que te encuentres muy bien.\n\nNos comunicamos contigo porque revisamos con atención la observación que registraste sobre tu solicitud.\nEl equipo de ${dep} realizó un nuevo seguimiento y ya contamos con una nueva respuesta.\n\n`;
+
+  const detalle =
+    `Número de solicitud : ${sol.id}\n` +
+    `Fecha de gestión    : ${seguimiento.fecha}\n` +
+    `Estado              : ${seguimiento.estado}\n` +
+    `Estudiante          : ${sol.estudiante || '-'}\n` +
+    `Grado               : ${sol.grado || '-'}\n\n` +
+    (esPrimera ? 'Respuesta de nuestro equipo:\n' : 'Nueva respuesta de nuestro equipo:\n') +
+    seguimiento.respuesta + '\n\n';
+
+  const cierre = esPrimera
+    ? `Si tienes alguna pregunta adicional o consideras que tu caso no fue resuelto satisfactoriamente,\npuedes registrar una observación usando el enlace que encontrarás más abajo.\nEstamos aquí para acompañarte en todo el proceso.\n\n`
+    : `Seguimos trabajando para ofrecerte la mejor experiencia y acompañamiento.\nGracias por permitirnos continuar mejorando nuestro servicio. Tu voz hace la diferencia.\n\n`;
+
+  const bloqueEnlace =
+    `──────────────────────────────────────────\n` +
+    `Cuéntanos cómo te fue. Haz clic en el siguiente enlace para\n` +
+    `confirmar si tu caso fue resuelto o para registrar una observación:\n` +
+    linkRespuesta + '\n' +
+    `──────────────────────────────────────────\n\n`;
+
+  return intro + detalle + cierre + bloqueEnlace +
+    `En el Colegio Goyavier Campestre trabajamos cada día para brindarte la mejor atención.\n` +
+    `Tu bienestar y el de tu familia son muy importantes para nosotros.\n\n` +
+    `Con mucho gusto te atendemos,\nEquipo PQRS · Colegio Goyavier Campestre`;
+}
+
 function clearForm() {
   ['f-fecha','f-dependencia','f-nombre','f-telefono','f-correo','f-estudiante','f-grado','f-tiposolicitud','f-medio','f-requiere','f-descripcion'].forEach(id => {
     const el = document.getElementById(id);
@@ -2586,58 +2650,91 @@ async function guardarSeguimiento() {
   const sol = DB.solicitudes.find(s=>s.id===_currentSolicitudId);
   if(!sol) return;
 
-  _guardandoSeguimiento = true;
-  const btn = document.getElementById('btn-guardar-seg');
-  if(btn) { btn.disabled = true; btn.textContent = '⏳ Enviando correo...'; }
-
-  if(!sol.seguimientos) sol.seguimientos = [];
   const ahora = new Date().toISOString();
   const seguimiento = { fecha, respuesta, estado: nuevoEstado, registradoEn: ahora, tipo: 'secretaria', autor: 'Secretaría', segKey: ahora };
 
-  try {
-    // 1. Enviar correo PRIMERO — si falla, el seguimiento NO se guarda en Sheets
-    let emailResult = null;
-    if (sol.correo) {
-      if(btn) btn.textContent = '⏳ Enviando correo...';
-      try {
-        emailResult = await sendResponseEmail(sol, seguimiento);
-      } catch(emailErr) {
-        if (emailErr.message === 'TOKEN_EXPIRED') return; // renderLoginScreen ya fue llamado
-        toast('❌ Error al enviar el correo: ' + emailErr.message + '. El seguimiento no fue guardado.', 'error');
-        return; // No guardar
-      }
-    }
+  if (sol.correo) {
+    // Abrir Gmail compose con el correo de respuesta pre-listo
+    const subject = encodeURIComponent(`[Colegio Goyavier] Tenemos novedades sobre tu solicitud · ${sol.id}`);
+    const body = encodeURIComponent(buildResponseEmailBody(sol, seguimiento));
+    const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(sol.correo)}&su=${subject}&body=${body}`;
+    // Guardar datos pendientes para usarlos tras la confirmación
+    _pendingSegSol = sol;
+    _pendingSegSeguimiento = seguimiento;
+    window.open(gmailUrl, '_blank');
+    // Mostrar modal de confirmación — el seguimiento NO se guarda hasta que el usuario confirme
+    document.getElementById('modal-seg-email-nombre').textContent = sol.nombre || '';
+    document.getElementById('modal-seg-email-dest').textContent = sol.correo;
+    openModal('modal-seg-confirm-email');
+  } else {
+    // Sin correo — guardar directamente sin pasar por Gmail
+    await _ejecutarGuardarSeguimiento(sol, seguimiento, false);
+  }
+}
 
-    // 2. Correo enviado (o sin dirección). Ahora sí guardar el seguimiento.
-    if(btn) btn.textContent = '⏳ Guardando...';
+async function _ejecutarGuardarSeguimiento(sol, seguimiento, correoEnviado) {
+  _guardandoSeguimiento = true;
+  const btn = document.getElementById('btn-guardar-seg');
+  if(btn) { btn.disabled = true; btn.textContent = '⏳ Guardando...'; }
+  try {
+    if(!sol.seguimientos) sol.seguimientos = [];
     sol.seguimientos.push(seguimiento);
-    sol.estado = nuevoEstado;
+    sol.estado = seguimiento.estado;
     if (_areaSegIdx !== null && sol.seguimientos[_areaSegIdx]) {
       sol.seguimientos[_areaSegIdx].tipo = 'aprobada';
     }
     _areaSegIdx = null;
     await pushToSheets();
-
     closeModal('modal-seg');
-    if (emailResult) {
-      const via = emailResult.via === 'gmail_api' ? ' (enviado desde su cuenta)' : '';
-      toast(`✅ Seguimiento registrado y correo enviado a ${sol.correo}${via}.`, 'success');
+    if (correoEnviado) {
+      toast(`✅ Seguimiento registrado. Correo enviado a ${sol.correo}.`, 'success');
+    } else if (sol.correo) {
+      toast(`✅ Seguimiento registrado. El correo no fue enviado al solicitante.`, 'success');
     } else {
       toast(`✅ Seguimiento registrado. Sin correo registrado, no se envió notificación.`, 'success');
     }
-    renderSeguimiento();
-    renderDashboard();
-    renderHistorial();
-    updateBadge();
+    renderSeguimiento(); renderDashboard(); renderHistorial(); updateBadge();
   } catch(e) {
-    // Revertir si pushToSheets falla (el correo ya fue enviado — caso raro)
     sol.seguimientos.pop();
     sol.estado = sol.seguimientos.length ? sol.seguimientos[sol.seguimientos.length-1].estado : 'Abierto';
-    toast('Ocurrió un error al guardar el seguimiento en el sistema. Por favor intenta de nuevo.', 'error');
+    toast('Ocurrió un error al guardar el seguimiento. Por favor intenta de nuevo.', 'error');
   } finally {
     _guardandoSeguimiento = false;
     if(btn) { btn.disabled = false; btn.innerHTML = '💾 Guardar Seguimiento'; }
   }
+}
+
+async function confirmarSegCorreoEnviado() {
+  closeModal('modal-seg-confirm-email');
+  const sol = _pendingSegSol; const seg = _pendingSegSeguimiento;
+  _pendingSegSol = null; _pendingSegSeguimiento = null;
+  if (!sol || !seg) return;
+  await _ejecutarGuardarSeguimiento(sol, seg, true);
+}
+
+function reintentarSegCorreo() {
+  if (!_pendingSegSol || !_pendingSegSeguimiento) return;
+  const sol = _pendingSegSol; const seg = _pendingSegSeguimiento;
+  const subject = encodeURIComponent(`[Colegio Goyavier] Tenemos novedades sobre tu solicitud · ${sol.id}`);
+  const body = encodeURIComponent(buildResponseEmailBody(sol, seg));
+  const gmailUrl = `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(sol.correo)}&su=${subject}&body=${body}`;
+  window.open(gmailUrl, '_blank');
+  // El modal permanece abierto para que el usuario confirme
+}
+
+async function guardarSegSinCorreo() {
+  closeModal('modal-seg-confirm-email');
+  const sol = _pendingSegSol; const seg = _pendingSegSeguimiento;
+  _pendingSegSol = null; _pendingSegSeguimiento = null;
+  if (!sol || !seg) return;
+  await _ejecutarGuardarSeguimiento(sol, seg, false);
+}
+
+function cancelarSegCorreo() {
+  _pendingSegSol = null;
+  _pendingSegSeguimiento = null;
+  closeModal('modal-seg-confirm-email');
+  toast('Envío cancelado. El seguimiento no fue guardado.', 'warn');
 }
 
 // ════════════════════════════════════════════════════════════════
