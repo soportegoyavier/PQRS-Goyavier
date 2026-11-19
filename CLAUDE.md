@@ -7,7 +7,7 @@ Secretaría Académica del Colegio Goyavier Campestre (Colombia).
 
 **Google Apps Script + Google Sheets. NO Supabase, NO Postgres, NO npm/build.** El repositorio son
 3 archivos: `PQRS-FINAL.html` (cliente completo HTML+CSS+JS en un solo archivo),
-`CODE-APPS-SCRIPT-FINAL.gs` (backend real de Apps Script), y `logo_goyavier.png`. La "base de datos"
+`CODE-APPS-SCRIPT-FINAL.gs` (backend real de Apps Script), y `logo_goyavier.png` (más las herramientas de abajo: `sincronizar_script_embebido.py`, `pruebas/`, `vercel.json`). La "base de datos"
 son 5 pestañas de una hoja de Google Sheets (`PQRS`, `Respuestas de formulario 1`, `Seguimientos`,
 `Configuracion`, `UsuariosPQRS`). Se despliega vía `doGet`/`doPost` y `HtmlService`. No asumir ni
 introducir un backend gestionado distinto a este sin que sea una decisión explícita y confirmada.
@@ -35,3 +35,13 @@ prevalece sobre cualquier suposición general — este archivo solo referencia, 
 7. **`pqrs-goyavier-guardian`** — fija la identidad general del proyecto: stack real, entidades
    PQRSF propias del colegio, modelo de acceso (rol único, ciudadanos sin login) y el caso de
    drift ya real entre los 2 archivos fuente.
+
+## Perfiles, bandejas y herramientas (v3.1 · 2026-11-19)
+
+- **Tres perfiles** (columna `Perfil` de `UsuariosPQRS`): `Secretaria` (ve padres de familia y estudiantes), `Talento Humano` (colaboradores, proveedores/contratistas y visitantes) y `Rectoria` (todo). Cada solicitud tiene `TipoSolicitante` (lo elige quien llena el formulario) y de ahí sale su bandeja. El filtro vive **en el servidor** (`getData`, `syncData`, `enviarObsArea_`). Ya no existe el rol único `Staff`.
+- Solo «Padre de familia» y «Estudiante» llevan `Estudiante` y `Grado`.
+- `syncData` ya **no** reescribe la hoja completa: actualiza fila por fila, bajo candado, y solo borra lo que el cliente pide en `eliminados`.
+- Las hojas se leen y escriben **por nombre de columna**, nunca por posición.
+- Tras tocar `CODE-APPS-SCRIPT-FINAL.gs`: `python sincronizar_script_embebido.py` y luego `--check`; y correr `pruebas/` (ver `pruebas/README.md`). Nunca editar a mano `APPS_SCRIPT_CODE`.
+- Puesta en marcha y Vercel: `PASOS-DE-DESPLIEGUE.md`.
+

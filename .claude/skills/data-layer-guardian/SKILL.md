@@ -4,6 +4,15 @@ when_to_use: ["vamos a agregar una columna a PQRS", "necesito leer/escribir en S
 paths: "CODE-APPS-SCRIPT-FINAL.gs, PQRS-FINAL.html"
 ---
 
+## ⚠ Actualización 2026-11-19 — el guardado ya NO es «clear-and-rewrite» (prevalece sobre lo que se dice más abajo)
+
+- `syncData(solicitudes, auth, eliminados)` **actualiza fila por fila por ID, bajo `LockService`**, y solo escribe las filas que cambiaron. **No borra** las solicitudes que el cliente no menciona: solo elimina lo que viene en `eliminados` (borradores visibles para el perfil). Cada perfil solo escribe su bandeja (Rectoría, todas). Los seguimientos se actualizan por identidad (`SegKey`) y se agregan; nunca se borran.
+- Lo que el cliente no administra (`TokenRespuesta`, y `Calificacion` mientras no la envíe) **se conserva**. Antes cada guardado borraba las calificaciones de estrellas.
+- Las hojas se manejan **por nombre de columna**: `ensureHeaders` / `ensureSegHeaders_` agregan al final lo que falte y jamás reordenan ni sobrescriben. `getHeaders()` ahora incluye `TipoSolicitante` y `TokenRespuesta`. Nunca escribir por posición.
+- Los IDs `PQRS2260NNNN` los asigna el servidor (`generarId`: contador `PQRS_ULTIMO_ID` + máximo de la hoja) bajo candado; el cliente pide uno con `action=nextId`. Cada perfil ve solo parte de las solicitudes, así que **no puede calcular el siguiente ID por su cuenta**.
+- `onFormSubmit` y los endpoints públicos que escriben (`guardarRespuestaJson`, `guardarRespuestaAreaJson`, `cerrarPqrsJson`) toman el mismo candado. Los candados de Apps Script **no son reentrantes**: no anidar `conBloqueo_`.
+- Siguen vigentes: el `no-cors` hace silenciosos los fallos de `pushToSheets`, y si dos personas editan la misma fila gana la última (no hay versión por fila).
+
 ## Descripción
 
 **Este proyecto NO usa Supabase, NO usa Postgres, NO tiene RLS, NO tiene un ORM.** La capa de datos completa de PQRS-Goyavier son 5 pestañas de una hoja de Google Sheets, leídas y escritas desde Google Apps Script. Esta skill reemplaza lo que en otro proyecto sería una "skill de Supabase" — aquí no aplica tal cual, así que se adapta al modelo real: Sheets como base de datos, con sus propias garantías (pocas) y sus propios riesgos (concurrencia, ausencia de transacciones, ausencia de tipos).

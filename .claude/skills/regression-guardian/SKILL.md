@@ -4,6 +4,10 @@ when_to_use: ["actualicé el .gs, ¿hay que tocar algo más?", "voy a cambiar el
 paths: "CODE-APPS-SCRIPT-FINAL.gs, PQRS-FINAL.html"
 ---
 
+## ⚠ Actualización 2026-11-19 — desfase resuelto con herramienta
+
+La copia embebida `APPS_SCRIPT_CODE` se **regenera** con `python sincronizar_script_embebido.py` y se verifica con `--check`. La herramienta escribe `</script>` como `<\/script>`: sin eso el navegador corta el bloque `<script>` del HTML y la aplicación deja de funcionar. Antes de dar por terminado cualquier cambio al `.gs`: ejecutar la herramienta, `--check` y las pruebas de `pruebas/`. Lo que la sección 1 describe como desfase ya no aplica mientras se use la herramienta.
+
 ## Descripción
 
 Esta skill documenta y previene tres fuentes de regresión REALES (no hipotéticas) ya detectadas en PQRS-Goyavier. La más grave es un caso de drift ya consumado: `PQRS-FINAL.html` contiene una segunda copia completa y desactualizada del backend, embebida como template literal, que la propia aplicación presenta como el método oficial de despliegue — y esa copia está rota.

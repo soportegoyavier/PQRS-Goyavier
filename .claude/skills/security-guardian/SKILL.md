@@ -4,6 +4,10 @@ when_to_use: ["voy a agregar un endpoint público nuevo", "necesito una acción 
 paths: "CODE-APPS-SCRIPT-FINAL.gs, PQRS-FINAL.html"
 ---
 
+## ⚠ Actualización 2026-11-19 — perfiles (prevalece sobre la sección 2 y las reglas que hablan de un único rol)
+
+Existen tres perfiles (`Secretaria`, `Talento Humano`, `Rectoria`) tomados de la columna `Perfil` de `UsuariosPQRS`; el token de sesión lleva `perfil`. Un usuario sin perfil NO entra (falla cerrado) y una sesión sin perfil se rechaza. La autorización por bandeja se aplica en el servidor: `getData` filtra, `syncData` rechaza filas ajenas y `enviarObsArea_` comprueba acceso. El token `TokenRespuesta` ya no se envía al navegador. Toda función nueva que lea o escriba solicitudes debe recibir `auth` y usar `perfilVeBandeja_`. Siguen vigentes los puntos 1, 3 y 4 (claves en texto plano, `responderArea` sin token real, token de sesión por query string).
+
 ## Descripción
 
 PQRS-Goyavier tiene un modelo de seguridad mínimo y con debilidades ya conocidas y documentadas aquí — no hipotéticas. Esta skill existe para que ningún cambio futuro (a) agregue más secretos en texto plano al código fuente, (b) asuma que existen roles/permisos granulares que en realidad no existen, o (c) repita el patrón de "endpoint público sin token real" que ya constituye una brecha IDOR (Insecure Direct Object Reference) comprobada en `responderArea`.
