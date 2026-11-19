@@ -4,6 +4,14 @@ when_to_use: ["¿qué stack usa este proyecto?", "voy a empezar a trabajar en PQ
 paths: "CODE-APPS-SCRIPT-FINAL.gs, PQRS-FINAL.html, logo_goyavier.png"
 ---
 
+## ⚠ Actualización 2026-11-19 — perfiles y bandejas (prevalece sobre lo que se dice más abajo)
+
+- **Ya no existe el rol único `'Staff'`.** Cada usuario de `UsuariosPQRS` tiene un **Perfil** (`Secretaria`, `Talento Humano`, `Rectoria`). Cada solicitud cae en una **bandeja** según quién la presenta (columna `TipoSolicitante`: Padre de familia / Estudiante → `secretaria`; Colaborador / Proveedor o contratista / Visitante → `talento`). Secretaría ve solo su bandeja, Talento Humano solo la suya y Rectoría todo. El filtro se aplica **en el servidor** (`getData`, `syncData`, `enviarObsArea_`), nunca solo en la interfaz.
+- Solo «Padre de familia» y «Estudiante» llevan `Estudiante` y `Grado`. «Colaborador» como grado es un dato del formulario viejo: se normaliza a tipo Colaborador.
+- **El desfase entre `.gs` y `APPS_SCRIPT_CODE` se resuelve con una herramienta**: la copia embebida se genera con `python sincronizar_script_embebido.py` (el `.gs` es la única fuente). Nunca editarla a mano.
+- Las hojas se leen y escriben **por nombre de columna**, no por posición (`ensureHeaders` solo agrega columnas al final).
+- Las pruebas automáticas están en `pruebas/` (ver su README).
+
 ## Descripción
 
 Esta es la skill de identidad general del proyecto PQRS-Goyavier — el ancla que evita que cualquier razonamiento futuro (de Claude o de quien lea el repo) asuma incorrectamente un stack, una arquitectura de datos, o un modelo de permisos que no corresponden a la realidad del código. Complementa (no reemplaza) a las otras 6 skills especializadas: `architecture-guardian`, `regression-guardian`, `data-layer-guardian`, `ui-guardian`, `security-guardian`, `business-logic-guardian`.

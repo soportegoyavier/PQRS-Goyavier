@@ -15,6 +15,11 @@ const CFG_SHEET     = 'Configuracion';
 const USUARIOS_SHEET = 'UsuariosPQRS';
 // EMAIL_RESP: destinatario de notificaciones internas del sistema (no depende del usuario logueado)
 const EMAIL_RESP    = 'secretaria@colegiogoyavier.edu.co';
+// Si la pantalla del personal se publica en otro sitio (p. ej. Vercel), escriba aquí su dirección
+// (https://...). El enlace de acceso anterior —esta URL de Apps Script sin parámetros— mostrará un aviso
+// con un botón a la nueva dirección. Los enlaces que reciben solicitantes y áreas por correo NO cambian:
+// siguen siendo de Apps Script. Vacío = Apps Script sirve la pantalla (comportamiento anterior).
+const URL_APP       = '';
 
 // Escapa caracteres HTML para evitar XSS al insertar datos de Sheets en HTML generado.
 function sanitizeHtml_(str) {
@@ -26,6 +31,276 @@ function sanitizeHtml_(str) {
     .replace(/'/g, '&#39;');
 }
 
+// ============================================================
+//  PERFILES, BANDEJAS Y TIPO DE SOLICITANTE
+// ============================================================
+// Cada usuario de la hoja UsuariosPQRS tiene un «Perfil»:
+//   Secretaria · Talento Humano · Rectoria
+// Cada solicitud pertenece a UNA bandeja según QUIÉN la presenta (columna TipoSolicitante):
+//   Padre de familia, Estudiante                      → bandeja «secretaria»
+//   Colaborador, Proveedor o contratista, Visitante   → bandeja «talento»
+// Secretaría ve solo su bandeja, Talento Humano solo la suya y Rectoría ve todo.
+// El filtro se aplica en el SERVIDOR (getData / syncData / enviarObsArea_): el navegador nunca
+// recibe ni puede modificar filas de una bandeja que su perfil no ve.
+const PERFIL_SECRETARIA  = 'Secretaria';
+const PERFIL_TALENTO     = 'Talento Humano';
+const PERFIL_RECTORIA    = 'Rectoria';
+const BANDEJA_SECRETARIA = 'secretaria';
+const BANDEJA_TALENTO    = 'talento';
+const NOMBRE_BANDEJA     = { secretaria: 'Secretaría Académica', talento: 'Talento Humano' };
+const TIPOS_SOLICITANTE  = ['Padre de familia', 'Estudiante', 'Colaborador', 'Proveedor o contratista', 'Visitante'];
+const TIPOS_CON_ESTUDIANTE = ['Padre de familia', 'Estudiante'];
+// Posibles títulos de la pregunta «quién eres» en el Google Form (se comparan sin tildes ni signos).
+const CAMPOS_TIPO_SOLICITANTE = [
+  '¿Cuál es tu relación con el colegio?', 'Relación con el colegio', 'Tipo de solicitante',
+  'Soy', '¿Quién eres?', 'Quién eres', 'Eres', 'Rol'
+];
+// Si el título de la pregunta se cambió un poco, basta con que contenga alguna de estas frases.
+const CLAVES_PARCIALES_SOLICITANTE = ['relacion con el colegio', 'tipo de solicitante', 'quien eres'];
+const SEG_HEADERS = ['PQRS_ID','Fecha','Respuesta','Estado','RegistradoEn','Tipo','Autor','SegKey'];
+
+// Normaliza para comparar: sin tildes, minúsculas, sin signos, espacios simples.
+function normKey_(s) {
+  return String(s == null ? '' : s).normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function valorTexto_(v) {
+  if (v === undefined || v === null) return '';
+  return v instanceof Date ? v.toISOString() : String(v);
+}
+
+// Primer valor no vacío cuyo encabezado contenga alguna de las frases. pares = [[encabezado, valor], ...]
+function valorParcial_(pares, parciales) {
+  for (let i = 0; i < pares.length; i++) {
+    const n = normKey_(pares[i][0]);
+    const v = String(pares[i][1] == null ? '' : pares[i][1]).trim();
+    if (v && parciales.some(function(p) { return n.indexOf(p) >= 0; })) return v;
+  }
+  return '';
+}
+
+// Bandeja de una solicitud ya guardada, buscándola por ID (para endpoints públicos que solo traen el ID).
+function bandejaDePqrsId_(ss, id) {
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet || sheet.getLastRow() < 2) return BANDEJA_SECRETARIA;
+  const data = sheet.getDataRange().getValues();
+  const hdrs = data[0].map(function(h) { return String(h).trim(); });
+  const iId = hdrs.indexOf('ID');
+  const row = data.slice(1).find(function(r) { return String(r[iId]).trim() === id; });
+  return row ? bandejaDeFilaArray_(hdrs, row) : BANDEJA_SECRETARIA;
+}
+
+function normPerfil_(v) {
+  const n = normKey_(v);
+  if (!n) return '';
+  if (n.indexOf('rector') >= 0) return PERFIL_RECTORIA;
+  if (n.indexOf('talento') >= 0 || n.indexOf('humano') >= 0 || n === 'th') return PERFIL_TALENTO;
+  if (n.indexOf('secretar') >= 0) return PERFIL_SECRETARIA;
+  return '';
+}
+
+// Devuelve el nombre canónico del tipo de solicitante, o '' si no se reconoce.
+function normTipoSolicitante_(v) {
+  const n = normKey_(v);
+  if (!n) return '';
+  if (/\b(padre|madre|acudiente|familia)\b/.test(n)) return 'Padre de familia';
+  if (/\b(estudiante|alumno|alumna)\b/.test(n)) return 'Estudiante';
+  if (/\b(colaborador|colaboradora|empleado|empleada|docente|profesor|profesora|trabajador|trabajadora)\b/.test(n)) return 'Colaborador';
+  if (/\b(proveedor|proveedora|contratista)\b/.test(n)) return 'Proveedor o contratista';
+  if (/\bvisitante\b/.test(n)) return 'Visitante';
+  return '';
+}
+
+// Compatibilidad con el formulario anterior: ahí los colaboradores elegían «Colaborador» en la lista de Grado.
+// Devuelve {tipo, estudiante, grado} ya limpios.
+function normalizarSolicitante_(tipoRaw, estudiante, grado) {
+  let tipo = normTipoSolicitante_(tipoRaw);
+  let gr   = String(grado == null ? '' : grado).trim();
+  const est = String(estudiante == null ? '' : estudiante).trim();
+  if (!tipo) {
+    if (normKey_(gr) === 'colaborador') { tipo = 'Colaborador'; gr = ''; }
+    else tipo = String(tipoRaw == null ? '' : tipoRaw).trim();      // valor no reconocido: se conserva tal cual
+  }
+  return { tipo: tipo, estudiante: est, grado: gr };
+}
+
+function bandejaDeTipo_(tipo, grado) {
+  const t = normTipoSolicitante_(tipo);
+  if (t === 'Colaborador' || t === 'Proveedor o contratista' || t === 'Visitante') return BANDEJA_TALENTO;
+  if (t === 'Padre de familia' || t === 'Estudiante') return BANDEJA_SECRETARIA;
+  // Sin tipo (solicitudes anteriores al cambio): el formulario viejo ponía «Colaborador» como grado.
+  if (normKey_(grado) === 'colaborador') return BANDEJA_TALENTO;
+  return BANDEJA_SECRETARIA;
+}
+
+function perfilVeBandeja_(perfil, bandeja) {
+  if (perfil === PERFIL_RECTORIA)   return true;
+  if (perfil === PERFIL_SECRETARIA) return bandeja === BANDEJA_SECRETARIA;
+  if (perfil === PERFIL_TALENTO)    return bandeja === BANDEJA_TALENTO;
+  return false;
+}
+
+function bandejaDeFilaArray_(headers, row) {
+  const iT = headers.indexOf('TipoSolicitante');
+  const iG = headers.indexOf('Grado');
+  return bandejaDeTipo_(iT >= 0 ? row[iT] : '', iG >= 0 ? row[iG] : '');
+}
+
+// Líneas «Estudiante / Grado» solo cuando hay datos de estudiante (los colaboradores, proveedores y visitantes no los tienen).
+function lineasEstudiante_(estudiante, grado) {
+  const e = String(estudiante || '').trim(), g = String(grado || '').trim();
+  return (e ? 'Estudiante          : ' + e + '\n' : '') + (g ? 'Grado               : ' + g + '\n' : '');
+}
+
+// ── Correos por bandeja ──────────────────────────────────────
+// Configuracion.emailPerfiles = {secretaria, talentoHumano, rectoria}; copiarRectoria (por defecto sí).
+// Cada aviso va al correo de SU bandeja. Rectoría recibe copia ÚNICAMENTE cuando llega una solicitud nueva
+// (no en observaciones, cierres ni respuestas de un área). Si falta el correo de una bandeja se usa
+// EMAIL_RESP para que ninguna notificación se pierda.
+function correoDeBandeja_(bandeja, cfg) {
+  const ep = ((cfg || readConfigObject_()).emailPerfiles) || {};
+  const v = String((bandeja === BANDEJA_TALENTO ? ep.talentoHumano : ep.secretaria) || '').trim();
+  return v || EMAIL_RESP;
+}
+
+function destinatariosBandeja_(bandeja, conCopiaRectoria) {
+  const cfg = readConfigObject_();
+  const lista = [correoDeBandeja_(bandeja, cfg)];
+  const rect = String(((cfg.emailPerfiles) || {}).rectoria || '').trim();
+  if (conCopiaRectoria === true && rect && cfg.copiarRectoria !== false) lista.push(rect);
+  return lista.filter(function(x, i) { return x && lista.indexOf(x) === i; }).join(',');
+}
+
+// conCopiaRectoria = true solo para el aviso de «solicitud nueva».
+function notificarBandeja_(bandeja, asunto, cuerpo, conCopiaRectoria) {
+  GmailApp.sendEmail(destinatariosBandeja_(bandeja, conCopiaRectoria), asunto, cuerpo, {name: 'PQRS Colegio Goyavier'});
+}
+
+// ── Candado: evita que dos personas (o un solicitante y el personal) escriban la hoja a la vez ──
+function conBloqueo_(fn) {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(25000)) throw new Error('El sistema está ocupado. Intente de nuevo en unos segundos.');
+  try { return fn(); } finally { lock.releaseLock(); }
+}
+
+// Igual que conBloqueo_ pero para endpoints que responden JSON: si no hay turno, responde el error.
+function conBloqueoJson_(fn) {
+  try { return conBloqueo_(fn); } catch (err) { return jsonOut({ok: false, error: err.message}); }
+}
+
+// ── Encabezados por NOMBRE (nunca por posición) ──────────────
+function getHeaders() {
+  return ['ID','Fecha','Dependencia','Nombre',
+    'Telefono','Correo','Estudiante','Grado','TipoSolicitud','MedioRecepcion',
+    'RequiereRespuesta','Descripcion','Estado','EmailPendiente','CreadoEn','OrigenForms',
+    'ObservacionSolicitante','FechaObservacion','FormsKey','Calificacion',
+    'TipoSolicitante','TokenRespuesta'];
+}
+
+function estiloEncabezado_(range) {
+  range.setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
+}
+
+// Garantiza que existan todas las columnas estándar. Las que falten se agregan AL FINAL; nunca se
+// reordena, renombra ni borra una columna existente (así no se corrompen datos como TokenRespuesta).
+// Devuelve los encabezados REALES de la hoja, en su orden real.
+function asegurarEncabezados_(sheet, estandar) {
+  if (sheet.getLastRow() === 0) {
+    sheet.appendRow(estandar);
+    estiloEncabezado_(sheet.getRange(1, 1, 1, estandar.length));
+    return estandar.slice();
+  }
+  const ancho = Math.max(sheet.getLastColumn(), 1);
+  const act = sheet.getRange(1, 1, 1, ancho).getValues()[0].map(function(h) { return String(h).trim(); });
+  let fin = act.length;
+  while (fin > 0 && !act[fin - 1]) fin--;
+  const hdrs = act.slice(0, fin);
+  const faltan = estandar.filter(function(h) { return hdrs.indexOf(h) < 0; });
+  if (faltan.length) {
+    estiloEncabezado_(sheet.getRange(1, hdrs.length + 1, 1, faltan.length).setValues([faltan]));
+    faltan.forEach(function(h) { hdrs.push(h); });
+  }
+  return hdrs;
+}
+
+function ensureHeaders(sheet)       { return asegurarEncabezados_(sheet, getHeaders()); }
+function ensureSegHeaders_(sheet)   { return asegurarEncabezados_(sheet, SEG_HEADERS); }
+
+function mapaEncabezados_(hdrs) {
+  const m = {};
+  hdrs.forEach(function(h, i) { if (h && m[h] === undefined) m[h] = i; });
+  return m;
+}
+
+// ── Consecutivo de ID (PQRS2260NNNN) ─────────────────────────
+function numeroDeId_(id)  { return parseInt(String(id || '').replace('PQRS2260', ''), 10) || 0; }
+function formatoId_(n)    { return 'PQRS2260' + String(n).padStart(4, '0'); }
+
+function maxNumeroIdHoja_(sheet) {
+  let max = 0;
+  if (sheet && sheet.getLastRow() > 1) {
+    sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues().forEach(function(r) {
+      const n = numeroDeId_(String(r[0] || '').trim());
+      if (n > max) max = n;
+    });
+  }
+  return max;
+}
+
+function ultimoIdReservado_() {
+  return parseInt(PropertiesService.getScriptProperties().getProperty('PQRS_ULTIMO_ID') || '0', 10) || 0;
+}
+
+// Reserva el siguiente consecutivo. DEBE llamarse con el candado tomado.
+// Lleva un contador propio (PQRS_ULTIMO_ID) además del máximo de la hoja, porque cada perfil solo ve
+// una parte de las solicitudes y no puede calcular el siguiente número por su cuenta.
+function generarId(sheet) {
+  const n = Math.max(maxNumeroIdHoja_(sheet), ultimoIdReservado_()) + 1;
+  PropertiesService.getScriptProperties().setProperty('PQRS_ULTIMO_ID', String(n));
+  return formatoId_(n);
+}
+
+// Endpoint autenticado: el cliente pide un consecutivo antes de crear una solicitud manual.
+function reservarId_(auth) {
+  return conBloqueoJson_(function() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
+    ensureHeaders(sheet);
+    return jsonOut({ok: true, id: generarId(sheet)});
+  });
+}
+
+// ── Seguimientos: identidad estable de una fila para fusionar sin duplicar ──
+function identidadSeg_(id, segKey, registradoEn, tipo, respuesta) {
+  const k = valorTexto_(segKey).trim();
+  return String(id || '').trim() + '|' +
+    (k || (valorTexto_(registradoEn).trim() + '|' + String(tipo || '') + '|' + String(respuesta || '').slice(0, 60)));
+}
+
+// Sheets convierte las fechas escritas como texto en celdas de fecha; al leerlas vuelven como Date.
+// Se comparan por su valor para no reescribir filas que no cambiaron.
+function fechaIgual_(d, s) {
+  const t = String(s == null ? '' : s).trim();
+  if (!t) return false;
+  if (t === d.toISOString()) return true;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd') === t;
+  return false;
+}
+
+function celdaIgual_(a, b) {
+  if (a instanceof Date && b instanceof Date) return a.getTime() === b.getTime();
+  if (a instanceof Date) return fechaIgual_(a, b);
+  if (b instanceof Date) return fechaIgual_(b, a);
+  return valorTexto_(a).toLowerCase() === valorTexto_(b).toLowerCase();
+}
+
+function filaIgual_(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (!celdaIgual_(a[i], b[i])) return false;
+  return true;
+}
+
 function onFormSubmit(e) {
   try {
     if (!e || !e.namedValues) {
@@ -33,8 +308,6 @@ function onFormSubmit(e) {
       return;
     }
     const ss    = SpreadsheetApp.getActiveSpreadsheet();
-    const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
-    ensureHeaders(sheet);
     const r = e.namedValues;
 
     // Leer cabeceras reales de la hoja Forms para mapeo robusto de campos
@@ -45,9 +318,7 @@ function onFormSubmit(e) {
     const fVals = e.values || [];
 
     // get(fallbackIdx, ...keys): 3 niveles — exacto en namedValues → normalizado en namedValues
-    // → por header en hoja Forms → fallback por posición de columna (fallbackIdx).
-    // Los índices de posición deben coincidir con getData() y con el orden real del formulario.
-    const normKey_ = s => String(s).normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
+    // → por header en hoja Forms → fallback por posición de columna (fallbackIdx; -1 = sin fallback).
     const get = (fallbackIdx, ...keys) => {
       for(const k of keys) { if(r[k] && r[k][0].trim()) return r[k][0].trim(); }
       for(const k of keys) {
@@ -61,18 +332,24 @@ function onFormSubmit(e) {
 
     const formTimestamp = e.values && e.values[0] instanceof Date ? e.values[0].toISOString() : new Date().toISOString();
     const fecha      = formTimestamp.slice(0, 10);
-    const id         = generarId(sheet);
-    // Índices de columna coinciden con getData(): col A(0)=Timestamp, B(1)=Nombre, C(2)=Correo,
-    // D(3)=Telefono, E(4)=Estudiante, F(5)=TipoSolicitud, G(6)=Requiere, H(7)=Descripcion, I(8)=Grado
+    // Índices de columna (solo como último recurso) coinciden con getData(): col A(0)=Timestamp, B(1)=Nombre,
+    // C(2)=Correo, D(3)=Telefono, E(4)=Estudiante, F(5)=TipoSolicitud, G(6)=Requiere, H(7)=Descripcion, I(8)=Grado
     const nombre     = get(1, 'Nombre completo', 'Nombre', 'Nombres', 'Nombre del solicitante', 'Nombre y apellidos');
-    const correo     = get(2, 'Correo electrónico', 'Correo electronico', 'Correo', 'Email', 'E-mail');
+    const correo     = get(2, 'Correo electrónico donde recibirás respuesta y seguimiento de tu PQRS.', 'Correo electrónico', 'Correo electronico', 'Correo', 'Email', 'E-mail');
     const telefono   = get(3, 'Teléfono', 'Telefono', 'Celular', 'Móvil', 'Movil', 'Tel');
-    const estudiante = get(4, 'Nombre del estudiante', 'Estudiante', 'Nombre estudiante', 'Nombre del hijo', 'Nombre del hijo/a');
+    const estudiante0 = get(4, 'Nombre del estudiante', 'Estudiante', 'Nombre estudiante', 'Nombre del hijo', 'Nombre del hijo/a');
     const tiposol    = get(5, 'Tipo de solicitud', 'Tipo de Solicitud', 'Tipo PQRS', 'Tipo', 'Categoría', 'Categoria');
     const requiere   = get(6, 'Requiere respuesta', 'Requiere Respuesta') || 'Si';
     const descripcion= get(7, 'Descripción de la solicitud', 'Descripcion de la solicitud', 'Descripción', 'Descripcion', 'Mensaje', 'Detalle', 'Detalle de la solicitud', 'Su solicitud');
-    const grado      = get(8, 'Grado', 'Grado del estudiante', 'Curso', 'Grado/Curso', 'Grado o curso');
+    const grado0     = get(8, 'Grado', 'Grado del estudiante', 'Curso', 'Grado/Curso', 'Grado o curso');
+    const solicitanteRaw = get(-1, ...CAMPOS_TIPO_SOLICITANTE) ||
+      valorParcial_(Object.keys(r).map(function(k) { return [k, (r[k] && r[k][0]) || '']; }), CLAVES_PARCIALES_SOLICITANTE);
     const medio      = 'Forms';
+
+    // Quién presenta la solicitud (y limpieza del formulario viejo, donde «Colaborador» venía como grado)
+    const sol = normalizarSolicitante_(solicitanteRaw, estudiante0, grado0);
+    const estudiante = sol.estudiante, grado = sol.grado;
+    const bandeja = bandejaDeTipo_(sol.tipo, grado);
 
     // Generar un ID único estable (UUID) para esta fila del formulario
     const formsId = Utilities.getUuid();
@@ -91,8 +368,12 @@ function onFormSubmit(e) {
       formsSheet.getRange(e.range.getRow(), fIdCol + 1).setValue(formsId);
     }
 
-    const headers = getHeaders();
-    const rowData = headers.map(h => {
+    // ID consecutivo + fila nueva bajo candado (dos envíos simultáneos ya no pueden recibir el mismo ID)
+    let id = '';
+    conBloqueo_(function() {
+      const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
+      const hdrs = ensureHeaders(sheet);
+      id = generarId(sheet);
       const map = {
         ID: id, Fecha: fecha, Dependencia: '',
         Nombre: nombre, Telefono: telefono, Correo: correo,
@@ -100,14 +381,17 @@ function onFormSubmit(e) {
         MedioRecepcion: medio, RequiereRespuesta: requiere,
         Descripcion: descripcion, Estado: 'Borrador',
         EmailPendiente: 'FALSE', CreadoEn: formTimestamp,
-        OrigenForms: 'TRUE', FormsKey: formsId
+        OrigenForms: 'TRUE', FormsKey: formsId, TipoSolicitante: sol.tipo
       };
-      return map[h] !== undefined ? map[h] : '';
+      sheet.appendRow(hdrs.map(function(h) { return map[h] !== undefined ? map[h] : ''; }));
     });
-    sheet.appendRow(rowData);
-    const asunto = '[PQRS Goyavier] Nueva solicitud desde Forms · ' + id;
-    const cuerpo = 'Nueva solicitud PQRS desde el formulario web.\n\nID: ' + id + '\nFecha: ' + fecha + '\nTipo: ' + tiposol + '\nNombre: ' + nombre + '\nEstudiante: ' + estudiante + '\nGrado: ' + grado + '\nDescripción: ' + descripcion;
-    GmailApp.sendEmail(EMAIL_RESP, asunto, cuerpo);
+
+    const asunto = '[PQRS Goyavier] Nueva solicitud desde Forms · ' + id + ' · ' + (NOMBRE_BANDEJA[bandeja] || '');
+    const cuerpo = 'Nueva solicitud PQRS desde el formulario web.\n\nBandeja: ' + NOMBRE_BANDEJA[bandeja] +
+      '\n\nID: ' + id + '\nFecha: ' + fecha + '\nSolicitante: ' + (sol.tipo || '-') + '\nTipo: ' + tiposol +
+      '\nNombre: ' + nombre + '\n' + lineasEstudiante_(estudiante, grado).replace(/ +:/g, ':') +
+      'Descripción: ' + descripcion;
+    notificarBandeja_(bandeja, asunto, cuerpo, true);       // solicitud nueva: también copia a Rectoría
 
     // Enviar confirmación de recibo al solicitante
     if (correo) {
@@ -119,14 +403,13 @@ function onFormSubmit(e) {
           'Número de solicitud : ' + id + '\n' +
           'Fecha               : ' + fecha + '\n' +
           'Tipo de solicitud   : ' + tiposol + '\n' +
-          'Estudiante          : ' + (estudiante || '-') + '\n' +
-          'Grado               : ' + (grado || '-') + '\n\n' +
+          lineasEstudiante_(estudiante, grado) + '\n' +
           'Descripción:\n' + descripcion + '\n\n' +
           'Nuestro equipo revisará tu solicitud y te contactará a la brevedad. ' +
           'Cuando tengamos una respuesta oficial, te la haremos llegar a este mismo correo.\n\n' +
           'Gracias por confiar en el Colegio Goyavier Campestre.\n\n' +
           'Con atención,\nEquipo PQRS · Colegio Goyavier Campestre';
-        GmailApp.sendEmail(correo, asuntoSolic, cuerpoSolic, {name: 'PQRS Colegio Goyavier', replyTo: EMAIL_RESP});
+        GmailApp.sendEmail(correo, asuntoSolic, cuerpoSolic, {name: 'PQRS Colegio Goyavier', replyTo: correoDeBandeja_(bandeja)});
       } catch(mailSolicErr) {
         Logger.log('Error correo confirmación solicitante: ' + mailSolicErr.message);
       }
@@ -143,6 +426,7 @@ function doGet(e) {
     const action = e.parameter.action;
     // Sin parámetro action → servir la interfaz principal
     if (!action) {
+      if (/^https:\/\//.test(URL_APP)) return paginaNuevaDireccion_();
       return HtmlService.createHtmlOutputFromFile('PQRS-FINAL')
         .setTitle('Sistema PQRS · Goyavier Campestre')
         .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.SAMEORIGIN);
@@ -157,13 +441,15 @@ function doGet(e) {
     if (action === 'guardarRespuesta')      return guardarRespuestaSolicitante_(e.parameter);
     if (action === 'responderArea')         return serveFormRespuestaArea_(e.parameter);
     if (action === 'guardarRespuestaArea')  return guardarRespuestaArea_(e.parameter);
-    // Rutas públicas JSON (para fetch desde formularios de respuesta públicos)
-    if (action === 'guardarRespuestaJson')     return guardarRespuestaSolicitanteJson_(e.parameter);
-    if (action === 'guardarRespuestaAreaJson') return guardarRespuestaAreaJson_(e.parameter);
-    if (action === 'cerrarPqrsJson')           return cerrarPqrsSolicitanteJson_(e.parameter);
+    // Rutas públicas JSON (para fetch desde formularios de respuesta públicos). Escriben en la hoja,
+    // así que toman el mismo candado que el guardado del personal.
+    if (action === 'guardarRespuestaJson')     return conBloqueoJson_(function() { return guardarRespuestaSolicitanteJson_(e.parameter); });
+    if (action === 'guardarRespuestaAreaJson') return conBloqueoJson_(function() { return guardarRespuestaAreaJson_(e.parameter); });
+    if (action === 'cerrarPqrsJson')           return conBloqueoJson_(function() { return cerrarPqrsSolicitanteJson_(e.parameter); });
     const auth = requireAuthorized_(e.parameter.token);
     if (!auth.ok) return jsonOut(auth);
-    if (action === 'getData')        return getData();
+    if (action === 'getData')        return getData(auth);
+    if (action === 'nextId')         return reservarId_(auth);
     if (action === 'getConfig')      return getConfig();
     if (action === 'sendEmail')      return sendEmailFromParams_(e.parameter);
     if (action === 'enviarObsArea')  return enviarObsArea_(e.parameter, auth);
@@ -179,7 +465,7 @@ function doPost(e) {
     const payload = JSON.parse(e.postData.contents);
     const auth = requireAuthorized_(payload.token);
     if (!auth.ok) return jsonOut(auth);
-    if (payload.action === 'sync')          return syncData(payload.data);
+    if (payload.action === 'sync')          return syncData(payload.data, auth, payload.eliminados);
     if (payload.action === 'saveConfig')    return saveConfig(payload.config);
     if (payload.action === 'markFormsRow')  return markFormsRow(payload.timestamp);
     if (payload.action === 'sendResponseEmail') return sendResponseEmail(payload.solicitud, payload.seguimiento);
@@ -188,12 +474,35 @@ function doPost(e) {
   }
 }
 
+// Aviso del enlace de acceso antiguo cuando la pantalla vive en otro sitio. Es un enlace (no una
+// redirección automática) porque Apps Script muestra sus páginas dentro de un marco protegido.
+function paginaNuevaDireccion_() {
+  const url = sanitizeHtml_(URL_APP);
+  const html =
+    '<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/>' +
+    '<title>Sistema PQRS · Goyavier Campestre</title><style>' +
+    'body{font-family:Segoe UI,sans-serif;background:linear-gradient(145deg,#073f6e 0%,#0d5a96 55%,#1575bc 100%);min-height:100vh;display:flex;align-items:center;justify-content:center;margin:0;padding:24px}' +
+    '.c{background:#fff;border-radius:14px;max-width:420px;padding:36px 28px;text-align:center;box-shadow:0 16px 48px rgba(7,63,110,.35)}' +
+    'h2{color:#0d5a96;font-size:20px;margin:0 0 10px}p{color:#4a5568;font-size:14px;line-height:1.7;margin:0}' +
+    'a{display:inline-block;margin-top:18px;background:#0d5a96;color:#fff;text-decoration:none;font-weight:700;border-radius:8px;padding:12px 22px}' +
+    '</style></head><body><div class="c"><h2>El sistema PQRS tiene una nueva dirección</h2>' +
+    '<p>Ingrese desde el siguiente botón y guarde la nueva dirección en sus favoritos.</p>' +
+    '<a href="' + url + '" target="_top" rel="noopener">Abrir el sistema PQRS</a></div></body></html>';
+  return HtmlService.createHtmlOutput(html)
+    .setTitle('Sistema PQRS · Goyavier Campestre')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.SAMEORIGIN);
+}
+
+// Valida el token de sesión y devuelve el perfil. Una sesión emitida antes de existir los perfiles
+// (sin «perfil» guardado) se rechaza: obliga a iniciar sesión de nuevo y así recibe su perfil.
 function requireAuthorized_(token) {
   if (!token) return {ok: false, authorized: false, error: 'Sesión no iniciada.'};
   const raw = CacheService.getScriptCache().get('pqrs_token_' + token);
   if (!raw) return {ok: false, authorized: false, error: 'Sesión vencida. Inicie sesión nuevamente con Google.'};
   const data = JSON.parse(raw);
-  return {ok: true, authorized: true, usuario: data.usuario, email: data.email, nombre: data.nombre, role: data.role};
+  const perfil = normPerfil_(data.perfil);
+  if (!perfil) return {ok: false, authorized: false, error: 'Su sesión no tiene un perfil asignado. Cierre sesión e ingrese de nuevo.'};
+  return {ok: true, authorized: true, usuario: data.usuario, email: data.email, nombre: data.nombre, role: perfil, perfil: perfil};
 }
 
 function readConfigObject_() {
@@ -230,26 +539,33 @@ function saveConfig(config) {
   return jsonOut({ok: true});
 }
 
-function getData() {
+function filaAObjeto_(headers, row) {
+  const obj = {};
+  headers.forEach(function(h, i) {
+    if (!h || h === 'TokenRespuesta') return;          // el token de respuesta es un secreto del servidor
+    const val = row[i];
+    if (h === 'OrigenForms' || h === 'EmailPendiente') {
+      const v = String(val);
+      obj[h] = (v === 'TRUE' || v === 'true' || v === '1') ? 'TRUE' : 'FALSE';
+    } else {
+      obj[h] = valorTexto_(val);
+    }
+  });
+  return obj;
+}
+
+// Devuelve SOLO las solicitudes que el perfil de la sesión puede ver (ver «PERFILES, BANDEJAS…»).
+// Los IDs de las filas nuevas del Forms se asignan con TODAS las solicitudes a la vista y recién después
+// se filtra, para que todos los perfiles vean los mismos IDs.
+function getData(auth) {
+  const perfil = auth && auth.perfil;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const pqrsSheet = ss.getSheetByName(SHEET_NAME);
   let pqrsRows = [];
   if (pqrsSheet && pqrsSheet.getLastRow() >= 2) {
     const data = pqrsSheet.getDataRange().getValues();
-    const headers = data[0];
-    pqrsRows = data.slice(1).filter(r => r[0]).map(row => {
-      const obj = {};
-      headers.forEach((h, i) => {
-        const val = row[i];
-        if (h === 'OrigenForms' || h === 'EmailPendiente') {
-          const v = String(val);
-          obj[h] = (v === 'TRUE' || v === 'true' || v === '1') ? 'TRUE' : 'FALSE';
-        } else {
-          obj[h] = val instanceof Date ? val.toISOString() : (val !== undefined ? String(val) : '');
-        }
-      });
-      return obj;
-    });
+    const headers = data[0].map(function(h) { return String(h).trim(); });
+    pqrsRows = data.slice(1).filter(r => r[0]).map(row => filaAObjeto_(headers, row));
   }
 
   // Leer seguimientos y construir mapa por ID de PQRS
@@ -266,10 +582,10 @@ function getData() {
         fecha: fechaSeg,
         respuesta: String(row[2] || ''),
         estado: String(row[3] || ''),
-        registradoEn: row[4] instanceof Date ? row[4].toISOString() : String(row[4] || ''),
+        registradoEn: valorTexto_(row[4]),
         tipo: String(row[5] || 'secretaria'),
         autor: String(row[6] || ''),
-        segKey: String(row[7] || '')
+        segKey: valorTexto_(row[7])
       };
       if (!segMap[pqrsId]) segMap[pqrsId] = [];
       segMap[pqrsId].push(seg);
@@ -308,13 +624,15 @@ function getData() {
       if (revisadoCol >= 0 && String(row[revisadoCol]).trim().toUpperCase() === 'TRUE') return;
 
       const nombre      = getFormValue_(formsHeaders, row, ['Nombre completo', 'Nombre', 'Nombres', 'Nombre del solicitante', 'Nombre y apellidos'], 1);
-      const correo      = getFormValue_(formsHeaders, row, ['Correo electrónico', 'Correo electronico', 'Correo', 'Email', 'E-mail'], 2);
+      const correo      = getFormValue_(formsHeaders, row, ['Correo electrónico donde recibirás respuesta y seguimiento de tu PQRS.', 'Correo electrónico', 'Correo electronico', 'Correo', 'Email', 'E-mail'], 2);
       const telefono    = getFormValue_(formsHeaders, row, ['Teléfono', 'Telefono', 'Celular', 'Móvil', 'Movil', 'Tel'], 3);
       const estudiante  = getFormValue_(formsHeaders, row, ['Nombre del estudiante', 'Estudiante', 'Nombre estudiante', 'Nombre del hijo', 'Nombre del hijo/a'], 4);
       const tiposol     = getFormValue_(formsHeaders, row, ['Tipo de solicitud', 'Tipo de Solicitud', 'Tipo PQRS', 'Tipo', 'Categoría', 'Categoria'], 5);
       const requiere    = getFormValue_(formsHeaders, row, ['Requiere respuesta', 'Requiere Respuesta'], 6) || 'Si';
       const descripcion = getFormValue_(formsHeaders, row, ['Descripción de la solicitud', 'Descripcion de la solicitud', 'Descripción', 'Descripcion', 'Mensaje', 'Detalle', 'Detalle de la solicitud', 'Su solicitud'], 7);
       const grado       = getFormValue_(formsHeaders, row, ['Grado', 'Grado del estudiante', 'Curso', 'Grado/Curso', 'Grado o curso'], 8);
+      const solicitante = getFormValue_(formsHeaders, row, CAMPOS_TIPO_SOLICITANTE, -1) ||
+        valorParcial_(formsHeaders.map(function(h, i) { return [h, row[i]]; }), CLAVES_PARCIALES_SOLICITANTE);
 
       // Registrar para evitar duplicados dentro de esta misma llamada a getData()
       processedFormsKeys.add(formsId);
@@ -329,6 +647,7 @@ function getData() {
         Correo:        correo,
         Estudiante:    estudiante,
         Grado:         grado,
+        TipoSolicitante: solicitante,
         TipoSolicitud: tiposol,
         MedioRecepcion:'Forms',
         RequiereRespuesta: requiere,
@@ -338,22 +657,28 @@ function getData() {
       });
     });
   }
-  let maxNum = 0;
+  // IDs pendientes: parten del mayor número a la vista o ya reservado, para no repetir ninguno
+  let maxNum = ultimoIdReservado_();
   pqrsRows.forEach(r => {
-    const n = parseInt(String(r.ID || '').replace('PQRS2260', '')) || 0;
+    const n = numeroDeId_(String(r.ID || '').trim());
     if (n > maxNum) maxNum = n;
   });
   pqrsRows.forEach(r => {
     if (!r.ID) {
       maxNum++;
-      r.ID = 'PQRS2260' + String(maxNum).padStart(4, '0');
+      r.ID = formatoId_(maxNum);
     }
   });
-  // Adjuntar seguimientos a cada PQRS desde la hoja Seguimientos
+  // Adjuntar seguimientos y bandeja a cada PQRS
   pqrsRows.forEach(r => {
+    const n = normalizarSolicitante_(r.TipoSolicitante, r.Estudiante, r.Grado);   // corrige datos del formulario anterior
+    r.TipoSolicitante = n.tipo;
+    r.Estudiante = n.estudiante;
+    r.Grado = n.grado;
+    r.Bandeja = bandejaDeTipo_(n.tipo, n.grado);
     r.seguimientos = segMap[r.ID] || [];
   });
-  return jsonOut(pqrsRows);
+  return jsonOut(pqrsRows.filter(r => perfilVeBandeja_(perfil, r.Bandeja)));
 }
 
 function normalizeTimestamp_(value) {
@@ -369,66 +694,168 @@ function normalizeStr_(s) {
   return String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
 }
 
+// Busca el valor de una pregunta del Forms por su título. La posición de columna (fallbackIndex) es el
+// último recurso y SOLO se usa si ningún título candidato existe en la hoja: si la pregunta existe pero la
+// persona no la contestó (p. ej. un colaborador no llena «Nombre del estudiante»), el valor es vacío.
 function getFormValue_(headers, row, names, fallbackIndex) {
+  let encontrada = false;
   for (const name of names) {
     const idx = headers.indexOf(name);
-    if (idx >= 0 && row[idx] !== undefined && String(row[idx]).trim()) return String(row[idx]).trim();
+    if (idx >= 0) {
+      encontrada = true;
+      if (row[idx] !== undefined && String(row[idx]).trim()) return String(row[idx]).trim();
+    }
   }
-  // Segundo intento: comparación sin acento/mayúsculas
+  // Segundo intento: comparación sin tildes, mayúsculas ni signos de puntuación
   for (const name of names) {
-    const norm = normalizeStr_(name);
-    const idx = headers.findIndex(h => normalizeStr_(h) === norm);
-    if (idx >= 0 && row[idx] !== undefined && String(row[idx]).trim()) return String(row[idx]).trim();
+    const norm = normKey_(name);
+    const idx = headers.findIndex(h => normKey_(h) === norm);
+    if (idx >= 0) {
+      encontrada = true;
+      if (row[idx] !== undefined && String(row[idx]).trim()) return String(row[idx]).trim();
+    }
   }
-  return row[fallbackIndex] !== undefined ? String(row[fallbackIndex]).trim() : '';
+  if (encontrada) return '';
+  return fallbackIndex >= 0 && row[fallbackIndex] !== undefined ? String(row[fallbackIndex]).trim() : '';
 }
 
-function syncData(solicitudes) {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
-  const segSheet = ss.getSheetByName(SEG_SHEET) || ss.insertSheet(SEG_SHEET);
-  const headers = getHeaders();
-  ensureHeaders(sheet);
-  const segHeaders = ['PQRS_ID','Fecha','Respuesta','Estado','RegistradoEn','Tipo','Autor','SegKey'];
-  if (segSheet.getLastRow() === 0) {
-    segSheet.appendRow(segHeaders);
-    segSheet.getRange(1, 1, 1, segHeaders.length).setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
-  } else {
-    const existH = segSheet.getRange(1, 1, 1, segSheet.getLastColumn()).getValues()[0];
-    if (existH.indexOf('Tipo') < 0) {
-      const tc = existH.length + 1;
-      segSheet.getRange(1, tc).setValue('Tipo').setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
-      segSheet.getRange(1, tc+1).setValue('Autor').setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
+// Arma la fila de la hoja PQRS a partir de la solicitud del cliente. Los campos que el cliente no
+// administra (TokenRespuesta, y Calificacion mientras el cliente no la envíe) conservan lo que ya había.
+function construirFila_(s, hdrs, previa) {
+  const t = normalizarSolicitante_(s.tipoSolicitante, s.estudiante, s.grado);
+  const v = {
+    ID: s.id, Fecha: s.fecha || '', Dependencia: s.dependencia || '', Nombre: s.nombre || '',
+    Telefono: s.telefono || '', Correo: s.correo || '', Estudiante: t.estudiante, Grado: t.grado,
+    TipoSolicitud: s.tipoSolicitud || '', MedioRecepcion: s.medioRecepcion || '',
+    RequiereRespuesta: s.requiereRespuesta || '', Descripcion: s.descripcion || '',
+    Estado: s.estado || 'Borrador', EmailPendiente: s.emailPendiente ? 'TRUE' : 'FALSE',
+    CreadoEn: s.createdAt || '', OrigenForms: s.origenForms ? 'TRUE' : 'FALSE',
+    ObservacionSolicitante: s.observacionSolicitante || '', FechaObservacion: s.fechaObservacion || '',
+    FormsKey: s.formsKey || '', TipoSolicitante: t.tipo
+  };
+  return hdrs.map(function(h, i) {
+    if (h === 'Calificacion') {
+      return (s.calificacion !== undefined && s.calificacion !== null && s.calificacion !== '')
+        ? s.calificacion : (previa ? previa[i] : '');
     }
-    if (existH.indexOf('SegKey') < 0) {
-      const skc = segSheet.getLastColumn() + 1;
-      segSheet.getRange(1, skc).setValue('SegKey').setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
-    }
-  }
-  // Solo limpiar columnas estándar — las dinámicas (p.ej. TokenRespuesta) quedan intactas
-  if (sheet.getLastRow() > 1) sheet.getRange(2, 1, sheet.getLastRow()-1, headers.length).clearContent();
-  if (segSheet.getLastRow() > 1) segSheet.getRange(2, 1, segSheet.getLastRow()-1, Math.max(segSheet.getLastColumn(), segHeaders.length)).clearContent();
-  solicitudes.forEach((s, i) => {
-    sheet.getRange(i+2, 1, 1, headers.length).setValues([[
-      s.id, s.fecha, s.dependencia||'', s.nombre||'', s.telefono||'', s.correo||'', s.estudiante||'', s.grado||'',
-      s.tipoSolicitud||'', s.medioRecepcion||'', s.requiereRespuesta||'',
-      s.descripcion||'', s.estado||'Borrador', s.emailPendiente ? 'TRUE' : 'FALSE',
-      s.createdAt||'', s.origenForms ? 'TRUE' : 'FALSE',
-      s.observacionSolicitante||'', s.fechaObservacion||'', s.formsKey||'',
-      s.calificacion||''
-    ]]);
+    if (h && Object.prototype.hasOwnProperty.call(v, h)) return v[h];
+    return previa && previa[i] !== undefined ? previa[i] : '';
   });
-  let segRow = 2;
-  solicitudes.forEach(s => {
-    (s.seguimientos || []).forEach(seg => {
-      segSheet.getRange(segRow, 1, 1, segHeaders.length).setValues([[
-        s.id, seg.fecha, seg.respuesta, seg.estado, seg.registradoEn || '',
-        seg.tipo || 'secretaria', seg.autor || '', seg.segKey || ''
-      ]]);
-      segRow++;
+}
+
+// Guarda lo que envía el cliente SIN reescribir la hoja completa:
+//  · Cada solicitud se actualiza fila por fila (por ID); solo se escriben las filas que cambiaron.
+//  · Las solicitudes que el cliente no mencione NO se borran (puede haber llegado una nueva del Forms
+//    mientras tanto, o ser de otra bandeja). Solo se elimina lo que el cliente pide en «eliminados»
+//    (únicamente borradores que el perfil puede ver).
+//  · El perfil solo puede crear o modificar solicitudes de su bandeja (Rectoría, todas).
+//  · Los seguimientos nunca se borran: se actualizan por identidad y se agregan los nuevos.
+//  · Todo ocurre bajo candado: dos personas guardando a la vez ya no se pisan.
+function syncData(solicitudes, auth, eliminados) {
+  const perfil = auth && auth.perfil;
+  if (!perfil) return jsonOut({ok: false, error: 'Sesión sin perfil.'});
+  if (!Array.isArray(solicitudes)) return jsonOut({ok: false, error: 'Datos inválidos.'});
+  return conBloqueoJson_(function() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(SHEET_NAME) || ss.insertSheet(SHEET_NAME);
+    const segSheet = ss.getSheetByName(SEG_SHEET) || ss.insertSheet(SEG_SHEET);
+    const hdrs = ensureHeaders(sheet);
+    const segHdrs = ensureSegHeaders_(segSheet);
+    const H = mapaEncabezados_(hdrs);
+    const S = mapaEncabezados_(segHdrs);
+
+    const nFilas = Math.max(sheet.getLastRow() - 1, 0);
+    let actuales = nFilas ? sheet.getRange(2, 1, nFilas, hdrs.length).getValues() : [];
+    const idDe = function(row) { return String(row[H.ID] || '').trim(); };
+    const bandejaDe = function(row) { return bandejaDeTipo_(row[H.TipoSolicitante], row[H.Grado]); };
+    const visible = function(row) { return perfilVeBandeja_(perfil, bandejaDe(row)); };
+    const posPorId = {};
+    actuales.forEach(function(row, i) { const id = idDe(row); if (id) posPorId[id] = i; });
+
+    // 1) Eliminaciones pedidas: solo borradores visibles para este perfil
+    const aEliminar = {};
+    (Array.isArray(eliminados) ? eliminados : []).forEach(function(raw) {
+      const id = String(raw || '').trim();
+      if (!id || posPorId[id] === undefined) return;
+      const row = actuales[posPorId[id]];
+      if (String(row[H.Estado] || '') === 'Borrador' && visible(row)) aEliminar[id] = true;
     });
+
+    // 2) Solicitudes entrantes que este perfil puede escribir
+    const entrantes = {};
+    const orden = [];
+    let rechazadas = 0;
+    solicitudes.forEach(function(s) {
+      const id = String((s && s.id) || '').trim();
+      if (!id || aEliminar[id]) return;
+      const previa = posPorId[id] !== undefined ? actuales[posPorId[id]] : null;
+      const t = normalizarSolicitante_(s.tipoSolicitante, s.estudiante, s.grado);
+      // Una existente la puede modificar quien hoy la ve (incluso reasignarla a la otra bandeja);
+      // una nueva debe pertenecer a la bandeja del perfil.
+      const permitido = previa ? visible(previa) : perfilVeBandeja_(perfil, bandejaDeTipo_(t.tipo, t.grado));
+      if (!permitido) { rechazadas++; return; }
+      if (!entrantes[id]) orden.push(id);
+      entrantes[id] = s;
+    });
+
+    // 3) Borrar (de abajo hacia arriba para no mover las posiciones pendientes)
+    const idsBorrar = Object.keys(aEliminar).sort(function(a, b) { return posPorId[b] - posPorId[a]; });
+    idsBorrar.forEach(function(id) { sheet.deleteRow(posPorId[id] + 2); });
+    if (idsBorrar.length) {
+      actuales = actuales.filter(function(row) { const id = idDe(row); return !(id && aEliminar[id]); });
+      Object.keys(posPorId).forEach(function(k) { delete posPorId[k]; });
+      actuales.forEach(function(row, i) { const id = idDe(row); if (id) posPorId[id] = i; });
+    }
+
+    // 4) Actualizar solo las filas que cambiaron
+    let actualizadas = 0;
+    actuales.forEach(function(row, i) {
+      const id = idDe(row);
+      if (!id || !entrantes[id]) return;
+      const nueva = construirFila_(entrantes[id], hdrs, row);
+      if (!filaIgual_(nueva, row)) {
+        sheet.getRange(i + 2, 1, 1, hdrs.length).setValues([nueva]);
+        actualizadas++;
+      }
+    });
+
+    // 5) Agregar las nuevas
+    const nuevas = orden.filter(function(id) { return posPorId[id] === undefined; })
+      .map(function(id) { return construirFila_(entrantes[id], hdrs, null); });
+    if (nuevas.length) sheet.getRange(actuales.length + 2, 1, nuevas.length, hdrs.length).setValues(nuevas);
+
+    // 6) Seguimientos: actualizar por identidad y agregar los nuevos; nunca se borran
+    const nSeg = Math.max(segSheet.getLastRow() - 1, 0);
+    const segActuales = nSeg ? segSheet.getRange(2, 1, nSeg, segHdrs.length).getValues() : [];
+    const segPos = {};
+    segActuales.forEach(function(row, i) {
+      segPos[identidadSeg_(row[S.PQRS_ID], row[S.SegKey], row[S.RegistradoEn], row[S.Tipo] || 'secretaria', row[S.Respuesta])] = i;
+    });
+    const segNuevos = [];
+    orden.forEach(function(id) {
+      (entrantes[id].seguimientos || []).forEach(function(seg) {
+        const vals = {
+          PQRS_ID: id, Fecha: seg.fecha || '', Respuesta: seg.respuesta || '', Estado: seg.estado || '',
+          RegistradoEn: seg.registradoEn || '', Tipo: seg.tipo || 'secretaria', Autor: seg.autor || '', SegKey: seg.segKey || ''
+        };
+        const fila = segHdrs.map(function(h) { return Object.prototype.hasOwnProperty.call(vals, h) ? vals[h] : ''; });
+        const ident = identidadSeg_(id, seg.segKey, seg.registradoEn, seg.tipo || 'secretaria', seg.respuesta);
+        if (segPos[ident] === -1) return;       // ya se agregó en este mismo envío
+        if (segPos[ident] !== undefined) {
+          const previa = segActuales[segPos[ident]];
+          const nueva = segHdrs.map(function(h, i) { return Object.prototype.hasOwnProperty.call(vals, h) ? vals[h] : previa[i]; });
+          if (!filaIgual_(nueva, previa)) segSheet.getRange(segPos[ident] + 2, 1, 1, segHdrs.length).setValues([nueva]);
+        } else {
+          segPos[ident] = -1;                 // evita agregar dos veces la misma identidad en este envío
+          segNuevos.push(fila);
+        }
+      });
+    });
+    if (segNuevos.length) segSheet.getRange(segActuales.length + 2, 1, segNuevos.length, segHdrs.length).setValues(segNuevos);
+
+    return jsonOut({ok: true, count: solicitudes.length, actualizadas: actualizadas, nuevas: nuevas.length,
+                    eliminadas: idsBorrar.length, rechazadas: rechazadas, segNuevos: segNuevos.length});
   });
-  return jsonOut({ok: true, count: solicitudes.length});
 }
 
 // Guarda o borra el token de respuesta del solicitante en la hoja PQRS.
@@ -462,6 +889,7 @@ function sendEmailFromParams_(p) {
   if (!destinatario) return jsonOut({ok: false, error: 'La solicitud no tiene correo del solicitante'});
   const sinEnlace = p.sinEnlace === 'true';
   const contexto  = String(p.contexto || 'respuesta');
+  const bandeja   = bandejaDeTipo_(p.tipoSolicitante, p.grado);
   const asunto = sinEnlace
     ? '[Colegio Goyavier] Recibimos tu solicitud · ' + p.id
     : contexto === 'respuestaObservacion'
@@ -473,7 +901,7 @@ function sendEmailFromParams_(p) {
   var bloqueEnlace = '';
   if (!sinEnlace) {
     tkn = Utilities.getUuid();
-    _actualizarTokenRespuesta_(p.id, tkn);
+    conBloqueo_(function() { _actualizarTokenRespuesta_(p.id, tkn); });
     enlaceRespuesta = ScriptApp.getService().getUrl() +
       '?action=responder&id=' + encodeURIComponent(p.id) +
       '&tkn=' + encodeURIComponent(tkn);
@@ -500,8 +928,7 @@ function sendEmailFromParams_(p) {
       'Número de solicitud : ' + p.id + '\n' +
       'Fecha de asignación : ' + p.segFecha + '\n' +
       'Estado              : En gestión\n' +
-      'Estudiante          : ' + (p.estudiante || '-') + '\n' +
-      'Grado               : ' + (p.grado || '-') + '\n\n';
+      lineasEstudiante_(p.estudiante, p.grado) + '\n';
     cierre =
       'Tan pronto tengamos una respuesta para ti, te la haremos llegar a este mismo correo.\n' +
       'Gracias por confiar en el Colegio Goyavier Campestre. Tu tranquilidad es lo más importante para nosotros.\n\n';
@@ -515,8 +942,7 @@ function sendEmailFromParams_(p) {
       'Número de solicitud : ' + p.id + '\n' +
       'Fecha de gestión    : ' + p.segFecha + '\n' +
       'Estado              : ' + p.segEstado + '\n' +
-      'Estudiante          : ' + (p.estudiante || '-') + '\n' +
-      'Grado               : ' + (p.grado || '-') + '\n\n' +
+      lineasEstudiante_(p.estudiante, p.grado) + '\n' +
       'Nueva respuesta de nuestro equipo:\n' + p.segRespuesta + '\n\n';
     cierre =
       'Seguimos trabajando para ofrecerte la mejor experiencia y acompañamiento.\n' +
@@ -531,8 +957,7 @@ function sendEmailFromParams_(p) {
       'Número de solicitud : ' + p.id + '\n' +
       'Fecha de gestión    : ' + p.segFecha + '\n' +
       'Estado              : ' + p.segEstado + '\n' +
-      'Estudiante          : ' + (p.estudiante || '-') + '\n' +
-      'Grado               : ' + (p.grado || '-') + '\n\n' +
+      lineasEstudiante_(p.estudiante, p.grado) + '\n' +
       'Respuesta de nuestro equipo:\n' + p.segRespuesta + '\n\n';
     cierre =
       'Si tienes alguna pregunta adicional o consideras que tu caso no fue resuelto satisfactoriamente,\n' +
@@ -546,9 +971,9 @@ function sendEmailFromParams_(p) {
     cierre +
     bloqueEnlace +
     'En el Colegio Goyavier Campestre trabajamos cada día para brindarte la mejor atención.\n' +
-    'Tu bienestar y el de tu familia son muy importantes para nosotros.\n\n' +
+    (bandeja === BANDEJA_TALENTO ? 'Tu opinión es muy importante para nosotros.\n\n' : 'Tu bienestar y el de tu familia son muy importantes para nosotros.\n\n') +
     'Con mucho gusto te atendemos,\nEquipo PQRS · Colegio Goyavier Campestre';
-  const opts = {name: 'PQRS Colegio Goyavier', replyTo: EMAIL_RESP};
+  const opts = {name: 'PQRS Colegio Goyavier', replyTo: correoDeBandeja_(bandeja)};
   // Intentar enviar desde la cuenta del usuario autenticado via Gmail API
   if (googleToken) {
     try {
@@ -570,7 +995,7 @@ function sendResponseEmail(solicitud, seguimiento) {
   if (!solicitud || !seguimiento) return jsonOut({ok: false, error: 'Solicitud o seguimiento no recibido'});
   return sendEmailFromParams_({
     correo: solicitud.correo, id: solicitud.id, nombre: solicitud.nombre,
-    estudiante: solicitud.estudiante, grado: solicitud.grado,
+    estudiante: solicitud.estudiante, grado: solicitud.grado, tipoSolicitante: solicitud.tipoSolicitante,
     segFecha: seguimiento.fecha, segRespuesta: seguimiento.respuesta, segEstado: seguimiento.estado
   });
 }
@@ -662,7 +1087,7 @@ function serveFormRespuestaArea_(p) {
       '<b>Estado actual:</b> ' + sanitizeHtml_(estado) +
       '</div>' +
       '<div class="desc"><b>Descripción de la solicitud:</b><br>' + sanitizeHtml_(desc) + '</div>' +
-      (obsSolic ? '<div style="background:#fffbeb;border:1px solid #fde68a;border-left:4px solid #d97706;border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:13px;line-height:1.6;color:#2d3748;"><b style="color:#92400e;display:block;margin-bottom:6px;">&#x26A0;&#xFE0F; El padre de familia registró una nueva observación:</b>' + sanitizeHtml_(obsSolic) + '</div>' : '') +
+      (obsSolic ? '<div style="background:#fffbeb;border:1px solid #fde68a;border-left:4px solid #d97706;border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:13px;line-height:1.6;color:#2d3748;"><b style="color:#92400e;display:block;margin-bottom:6px;">&#x26A0;&#xFE0F; El solicitante registró una nueva observación:</b>' + sanitizeHtml_(obsSolic) + '</div>' : '') +
       '<label for="obs">' + (obsSolic ? 'Tu respuesta a la observación del solicitante' : 'Tu respuesta o gestión del caso') + '</label>' +
       '<textarea id="obs" required placeholder="Describe detalladamente la gestión realizada o la respuesta a esta solicitud..."></textarea>' +
       '<button id="sbtn" onclick="enviarRespuestaArea()">Registrar mi respuesta</button>' +
@@ -683,7 +1108,7 @@ function serveFormRespuestaArea_(p) {
       '    .then(function(r){ return r.json(); })' +
       '    .then(function(data){' +
       '      if (data.ok) {' +
-      '        document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0;"><div style="font-size:48px;margin-bottom:16px;">&#x2705;</div><h2 style="color:#0d5a96;margin-bottom:10px;">¡Respuesta registrada!</h2><p style="color:#718096;font-size:14px;line-height:1.7;">¡Gracias por tu gestión! La respuesta a la solicitud <strong>' + id + '</strong> fue registrada exitosamente.<br><br>Secretaría Académica la revisará y la enviará al solicitante a la brevedad. Tu aporte es fundamental para brindar la mejor atención a nuestras familias.</p></div>\';' +
+      '        document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0;"><div style="font-size:48px;margin-bottom:16px;">&#x2705;</div><h2 style="color:#0d5a96;margin-bottom:10px;">¡Respuesta registrada!</h2><p style="color:#718096;font-size:14px;line-height:1.7;">¡Gracias por tu gestión! La respuesta a la solicitud <strong>' + id + '</strong> fue registrada exitosamente.<br><br>El equipo de PQRS del colegio la revisará y la enviará al solicitante a la brevedad. Tu aporte es fundamental para brindar la mejor atención a nuestras familias.</p></div>\';' +
       '      } else {' +
       '        btn.disabled = false; btn.textContent = "Registrar mi respuesta";' +
       '        document.getElementById("msg-error").style.display="block";' +
@@ -745,7 +1170,7 @@ function guardarRespuestaArea_(p) {
       '<div class="card"><div class="icon">&#x2705;</div>' +
       '<h2>¡Respuesta registrada!</h2>' +
       '<p>¡Gracias por tu gestión! La respuesta del área <strong>' + area + '</strong> fue registrada para la solicitud <strong>' + id + '</strong>.<br><br>' +
-      'Secretaría Académica la revisará y la enviará al solicitante a la brevedad. Tu aporte es fundamental para brindar la mejor atención a nuestras familias.</p>' +
+      'El equipo de PQRS del colegio la revisará y la enviará al solicitante a la brevedad. Tu aporte es fundamental para brindar la mejor atención a nuestras familias.</p>' +
       '</div></body></html>';
     return HtmlService.createHtmlOutput(html).setTitle('¡Respuesta registrada! · Colegio Goyavier');
   } catch(err) {
@@ -771,6 +1196,7 @@ function serveFormRespuesta_(p) {
     const tokenIdx      = headers.indexOf('TokenRespuesta');
     const row = data.slice(1).find(function(r) { return String(r[idIdx]).trim() === id; });
     if (!row) return HtmlService.createHtmlOutput('<p style="font-family:sans-serif;padding:24px;">Solicitud no encontrada. Verifique el enlace.</p>');
+    const correoContacto = correoDeBandeja_(bandejaDeFilaArray_(headers, row));
     const estado       = String(row[estadoIdx] || '');
     const nombre       = String(row[nombreIdx] || '');
     const estudiante   = String(row[estudianteIdx] || '');
@@ -822,7 +1248,7 @@ function serveFormRespuesta_(p) {
       formBody =
         '<div class="msg warn">&#x1F512; Este enlace ya fue utilizado o ya no está disponible.<br><br>' +
         'Nos pondremos en contacto contigo cuando tengamos novedades sobre tu solicitud. Te enviaremos un nuevo enlace para continuar.<br><br>' +
-        'Gracias por permitirnos acompañarte en este proceso. Si tienes alguna duda, escríbenos a <a href="mailto:' + EMAIL_RESP + '">' + EMAIL_RESP + '</a>.</div>';
+        'Gracias por permitirnos acompañarte en este proceso. Si tienes alguna duda, escríbenos a <a href="mailto:' + correoContacto + '">' + correoContacto + '</a>.</div>';
     } else {
       formBody =
         '<label for="accion">¿Cómo podemos ayudarte hoy?</label>' +
@@ -894,7 +1320,7 @@ function serveFormRespuesta_(p) {
         '      if (d.ok) {' +
         '        var starsHtml = "";' +
         '        for (var i = 1; i <= 5; i++) starsHtml += (i <= selectedRating ? "\\u2605" : "\\u2606");' +
-        '        document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0;"><div style="font-size:48px;margin-bottom:16px;">&#x2705;</div><h2 style="color:#0d5a96;margin-bottom:10px;">\\u00A1Muchas gracias!</h2><p style="color:#718096;font-size:14px;line-height:1.7;">Nos alegra saber que tu solicitud <strong>' + id + '</strong> fue atendida de manera satisfactoria.<br><br><span style="font-size:20px;color:#f6a609;">\' + starsHtml + \'</span><br><span style="font-size:13px;color:#856404;font-weight:600;">\' + ratingLabels[selectedRating] + \' (\' + selectedRating + \'/5)</span><br><br>Tu calificaci\\u00F3n ha sido registrada. En el Colegio Goyavier Campestre trabajamos cada d\\u00EDa para brindarte la mejor atenci\\u00F3n.<br><br><a href="mailto:' + EMAIL_RESP + '">' + EMAIL_RESP + '</a></p></div>\';' +
+        '        document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0;"><div style="font-size:48px;margin-bottom:16px;">&#x2705;</div><h2 style="color:#0d5a96;margin-bottom:10px;">\\u00A1Muchas gracias!</h2><p style="color:#718096;font-size:14px;line-height:1.7;">Nos alegra saber que tu solicitud <strong>' + id + '</strong> fue atendida de manera satisfactoria.<br><br><span style="font-size:20px;color:#f6a609;">\' + starsHtml + \'</span><br><span style="font-size:13px;color:#856404;font-weight:600;">\' + ratingLabels[selectedRating] + \' (\' + selectedRating + \'/5)</span><br><br>Tu calificaci\\u00F3n ha sido registrada. En el Colegio Goyavier Campestre trabajamos cada d\\u00EDa para brindarte la mejor atenci\\u00F3n.<br><br><a href="mailto:' + correoContacto + '">' + correoContacto + '</a></p></div>\';' +
         '      } else {' +
         '        btn.disabled = false; btn.textContent = "\\u2714\\uFE0F Confirmar, estoy satisfecho(a)";' +
         '        errEl.style.display = "block"; errEl.textContent = "Error: " + (d.error || "Intente de nuevo.");' +
@@ -915,7 +1341,7 @@ function serveFormRespuesta_(p) {
         '    .then(function(r){ return r.json(); })' +
         '    .then(function(d){' +
         '      if (d.ok) {' +
-        '        document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0;"><div style="font-size:48px;margin-bottom:16px;">&#x1F4E8;</div><h2 style="color:#0d5a96;margin-bottom:10px;">¡Recibimos tu observación!</h2><p style="color:#718096;font-size:14px;line-height:1.7;">Gracias por tomarte el tiempo de compartir tu opinión sobre la solicitud <strong>' + id + '</strong>.<br><br>Nuestro equipo la revisará con atención y te contactaremos a la brevedad. Estamos atentos a brindarte el mejor acompañamiento posible.<br><br>Gracias por permitirnos acompañarte en este proceso.<br><br><a href="mailto:' + EMAIL_RESP + '">' + EMAIL_RESP + '</a></p></div>\';' +
+        '        document.querySelector(".card-body").innerHTML = \'<div style="text-align:center;padding:30px 0;"><div style="font-size:48px;margin-bottom:16px;">&#x1F4E8;</div><h2 style="color:#0d5a96;margin-bottom:10px;">¡Recibimos tu observación!</h2><p style="color:#718096;font-size:14px;line-height:1.7;">Gracias por tomarte el tiempo de compartir tu opinión sobre la solicitud <strong>' + id + '</strong>.<br><br>Nuestro equipo la revisará con atención y te contactaremos a la brevedad. Estamos atentos a brindarte el mejor acompañamiento posible.<br><br>Gracias por permitirnos acompañarte en este proceso.<br><br><a href="mailto:' + correoContacto + '">' + correoContacto + '</a></p></div>\';' +
         '      } else {' +
         '        btn.disabled = false; btn.textContent = "\\u1F4E8 Enviar observacion";' +
         '        errEl.style.display = "block"; errEl.textContent = "Error: " + (d.error || "Intente de nuevo.");' +
@@ -1047,13 +1473,13 @@ function guardarRespuestaSolicitanteJson_(p) {
     try {
       const asunto = '[PQRS Goyavier] El solicitante registró una observación · ' + id;
       const cuerpo =
-        'El padre de familia no quedó satisfecho con la respuesta recibida y ha registrado una observación o inconformidad sobre la solicitud ' + id + '.\n\n' +
+        'El solicitante no quedó satisfecho con la respuesta recibida y ha registrado una observación o inconformidad sobre la solicitud ' + id + '.\n\n' +
         'Observación del solicitante:\n' + obs + '\n\n' +
         'El caso ha pasado al estado "Apelado". Por favor ingrese al sistema PQRS para revisar la observación,\n' +
         'comunicarla al área responsable y hacer el seguimiento correspondiente.\n\n' +
         'Recuerde que el solicitante está esperando una nueva respuesta que atienda su inconformidad.\n\n' +
         'Con atención,\nSistema PQRS · Colegio Goyavier Campestre';
-      GmailApp.sendEmail(EMAIL_RESP, asunto, cuerpo, {name: 'PQRS Colegio Goyavier'});
+      notificarBandeja_(bandejaDeFilaArray_(headers, data[rowNum - 1]), asunto, cuerpo);
     } catch(mailErr) {
       Logger.log('Error correo secretaría: ' + mailErr.message);
     }
@@ -1115,14 +1541,14 @@ function cerrarPqrsSolicitanteJson_(p) {
       const fechaCierre = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
       const calTexto = cal >= 1 ? ' Calificación otorgada: ' + cal + '/5 estrellas.' : '';
       segSheetCierre.appendRow([id, fechaCierre,
-        'El padre de familia confirmó que su solicitud fue atendida satisfactoriamente y solicitó el cierre del caso.' + calTexto,
+        'El solicitante confirmó que su solicitud fue atendida satisfactoriamente y solicitó el cierre del caso.' + calTexto,
         'Cerrado', new Date().toISOString(), 'cierre_solicitante', nombreCierre || 'Solicitante', Utilities.getUuid()]);
     } catch(segErrCierre) { Logger.log('Seg cierre err: ' + segErrCierre.message); }
     try {
       const asunto = '[PQRS Goyavier] Caso cerrado por el solicitante · ' + id;
       const calInfo = cal >= 1 ? '\nCalificación otorgada: ' + cal + '/5 estrellas.' : '';
-      const cuerpo = 'El padre de familia confirmó que su solicitud ' + id + ' fue atendida de manera satisfactoria y procedió a cerrar su caso.' + calInfo + '\n\nNo se requiere ninguna acción adicional. ¡Buena gestión!';
-      GmailApp.sendEmail(EMAIL_RESP, asunto, cuerpo, {name: 'PQRS Colegio Goyavier'});
+      const cuerpo = 'El solicitante confirmó que su solicitud ' + id + ' fue atendida de manera satisfactoria y procedió a cerrar su caso.' + calInfo + '\n\nNo se requiere ninguna acción adicional. ¡Buena gestión!';
+      notificarBandeja_(bandejaDeFilaArray_(headers, data[rowNum - 1]), asunto, cuerpo);
     } catch(mailErr) {
       Logger.log('Error correo cierre: ' + mailErr.message);
     }
@@ -1186,14 +1612,14 @@ function guardarRespuestaAreaJson_(p) {
           'Nueva respuesta del área:\n' + obs + '\n\n' +
           'Por favor ingrese al sistema PQRS para revisar esta respuesta y, si es adecuada, enviarla oficialmente al solicitante.\n' +
           'Recuerde que el solicitante está a la espera de una respuesta a su observación.\n\n' +
-          'Importante: Esta respuesta aún no ha sido enviada al solicitante. Solo Secretaría o Rectoría pueden hacerlo desde la aplicación.\n\n' +
+          'Importante: Esta respuesta aún no ha sido enviada al solicitante. Solo el personal autorizado del sistema PQRS puede hacerlo desde la aplicación.\n\n' +
           'Con atención,\nSistema PQRS · Colegio Goyavier Campestre'
         : 'El equipo de ' + area + ' acaba de registrar su respuesta a la solicitud ' + id + '.\n\n' +
           'Respuesta del área:\n' + obs + '\n\n' +
           'Por favor ingrese al sistema PQRS para revisar esta respuesta y, si es adecuada, enviarla oficialmente al solicitante.\n\n' +
-          'Importante: Esta respuesta aún no ha sido enviada al solicitante. Solo Secretaría o Rectoría pueden hacerlo desde la aplicación.\n\n' +
+          'Importante: Esta respuesta aún no ha sido enviada al solicitante. Solo el personal autorizado del sistema PQRS puede hacerlo desde la aplicación.\n\n' +
           'Con atención,\nSistema PQRS · Colegio Goyavier Campestre';
-      GmailApp.sendEmail(EMAIL_RESP, asuntoSec, cuerpoSec, {name: 'PQRS Colegio Goyavier'});
+      notificarBandeja_(bandejaDePqrsId_(ss, id), asuntoSec, cuerpoSec);
     } catch(mailErr) {
       Logger.log('Error correo secretaria: ' + mailErr.message);
     }
@@ -1240,6 +1666,9 @@ function sendViaGmailApi_(accessToken, to, subject, body, opts) {
 }
 
 // Login tradicional — busca usuario en UsuariosPQRS por email (o prefijo) + columna Clave.
+// Mensaje cuando un usuario autorizado todavía no tiene perfil en la hoja UsuariosPQRS.
+const ERROR_SIN_PERFIL = 'Su usuario no tiene un perfil asignado (Secretaria, Talento Humano o Rectoria). Contacte al administrador.';
+
 function login_(usuario, clave) {
   // Rate limiting: máx 5 intentos fallidos por IP/usuario en 15 minutos
   var cache = CacheService.getScriptCache();
@@ -1257,6 +1686,7 @@ function login_(usuario, clave) {
   var nombreCol= hdrs.indexOf('Nombre');
   var estadoCol= hdrs.indexOf('Estado');
   var claveCol = hdrs.indexOf('Clave');
+  var perfilCol= hdrs.indexOf('Perfil');
   if (emailCol < 0) return jsonOut({ok: false, error: 'Hoja UsuariosPQRS sin columna Email.'});
   if (claveCol < 0) return jsonOut({ok: false, error: 'Hoja UsuariosPQRS sin columna Clave. Ejecute inicializarSistema().'});
   var u = String(usuario || '').toLowerCase().trim();
@@ -1269,7 +1699,8 @@ function login_(usuario, clave) {
         email:  email,
         nombre: nombreCol >= 0 ? String(data[i][nombreCol] || email).trim() : email,
         estado: estadoCol >= 0 ? String(data[i][estadoCol] || 'ACTIVO').trim().toUpperCase() : 'ACTIVO',
-        clave:  claveCol  >= 0 ? String(data[i][claveCol]  || '') : ''
+        clave:  claveCol  >= 0 ? String(data[i][claveCol]  || '') : '',
+        perfil: perfilCol >= 0 ? normPerfil_(data[i][perfilCol]) : ''
       };
       break;
     }
@@ -1280,13 +1711,14 @@ function login_(usuario, clave) {
     return jsonOut({ok: false, error: 'Credenciales inválidas.'});
   }
   if (found.estado !== 'ACTIVO') return jsonOut({ok: false, error: 'Usuario inactivo. Contacte al administrador.'});
+  if (!found.perfil) return jsonOut({ok: false, error: ERROR_SIN_PERFIL});
   cache.remove(rlKey);
   var token = Utilities.getUuid();
   CacheService.getScriptCache().put('pqrs_token_' + token, JSON.stringify({
-    usuario: found.email, email: found.email, nombre: found.nombre, role: 'Staff',
+    usuario: found.email, email: found.email, nombre: found.nombre, role: found.perfil, perfil: found.perfil,
     createdAt: new Date().toISOString()
   }), 21600);
-  return jsonOut({ok: true, token: token, usuario: found.email, email: found.email, nombre: found.nombre, role: 'Staff'});
+  return jsonOut({ok: true, token: token, usuario: found.email, email: found.email, nombre: found.nombre, role: found.perfil, perfil: found.perfil});
 }
 
 function logout_(token) {
@@ -1297,7 +1729,7 @@ function logout_(token) {
 // Autenticación con Google — mismo patrón que Zaiko y Paz y Salvo.
 // El cliente envía el access_token obtenido via oauth2.initTokenClient.
 // GAS lo valida con la userinfo API de Google, luego comprueba el email
-// contra la hoja UsuariosPQRS (creada por inicializarSistema).
+// contra la hoja UsuariosPQRS (creada por inicializarSistema) y toma de ahí su Perfil.
 function googleLogin_(accessToken) {
   if (!accessToken) return jsonOut({ok: false, error: 'Token no recibido.'});
   try {
@@ -1322,6 +1754,7 @@ function googleLogin_(accessToken) {
     var emailCol  = usuHdrs.indexOf('Email');
     var nombreCol = usuHdrs.indexOf('Nombre');
     var estadoCol = usuHdrs.indexOf('Estado');
+    var perfilCol = usuHdrs.indexOf('Perfil');
     if (emailCol < 0) return jsonOut({ok: false, error: 'Hoja UsuariosPQRS mal configurada (falta columna Email).'});
 
     var found = null;
@@ -1330,13 +1763,15 @@ function googleLogin_(accessToken) {
         found = {
           email:  email,
           nombre: nombreCol >= 0 ? String(usuData[i][nombreCol] || email).trim() : email,
-          estado: estadoCol >= 0 ? String(usuData[i][estadoCol] || 'ACTIVO').trim().toUpperCase() : 'ACTIVO'
+          estado: estadoCol >= 0 ? String(usuData[i][estadoCol] || 'ACTIVO').trim().toUpperCase() : 'ACTIVO',
+          perfil: perfilCol >= 0 ? normPerfil_(usuData[i][perfilCol]) : ''
         };
         break;
       }
     }
     if (!found)                    return jsonOut({ok: false, error: 'Correo no autorizado: ' + email});
     if (found.estado !== 'ACTIVO') return jsonOut({ok: false, error: 'Usuario inactivo. Contacte al administrador.'});
+    if (!found.perfil)             return jsonOut({ok: false, error: ERROR_SIN_PERFIL});
 
     // 3. Emitir token de sesión (6 h)
     var sessionToken = Utilities.getUuid();
@@ -1344,10 +1779,11 @@ function googleLogin_(accessToken) {
       usuario: found.email,
       email:   found.email,
       nombre:  found.nombre,
-      role:    'Staff',
+      role:    found.perfil,
+      perfil:  found.perfil,
       createdAt: new Date().toISOString()
     }), 21600);
-    return jsonOut({ok: true, token: sessionToken, usuario: found.email, email: found.email, nombre: found.nombre, role: 'Staff'});
+    return jsonOut({ok: true, token: sessionToken, usuario: found.email, email: found.email, nombre: found.nombre, role: found.perfil, perfil: found.perfil});
   } catch(err) {
     return jsonOut({ok: false, error: 'Error al verificar con Google: ' + err.message});
   }
@@ -1372,13 +1808,15 @@ function enviarObsArea_(p, auth) {
     const col     = function(n) { return hdrs.indexOf(n); };
     const pqrsRow = data.slice(1).find(function(r) { return String(r[col('ID')] || '').trim() === id; });
     if (!pqrsRow) return jsonOut({ok: false, error: 'Solicitud ' + id + ' no encontrada.'});
+    const bandeja = bandejaDeFilaArray_(hdrs, pqrsRow);
+    if (!auth || !perfilVeBandeja_(auth.perfil, bandeja)) return jsonOut({ok: false, error: 'No tiene acceso a esta solicitud.'});
 
     const get = function(field) { var c = col(field); return c >= 0 ? String(pqrsRow[c] || '').trim() : ''; };
     const dep          = get('Dependencia');
     const nombreSol    = get('Nombre')              || 'el solicitante';
     const correoSol    = get('Correo')              || '';
-    const estudiante   = get('Estudiante')          || '-';
-    const grado        = get('Grado')               || '-';
+    const estudiante   = get('Estudiante');
+    const grado        = get('Grado');
     const tipo         = get('TipoSolicitud')       || '';
     const descripcion  = get('Descripcion')         || '';
     const estado       = get('Estado')              || '';
@@ -1420,11 +1858,11 @@ function enviarObsArea_(p, auth) {
       '&area=' + encodeURIComponent(dep) +
       '&tipo=observacion';
 
-    const remitente  = auth && auth.nombre ? auth.nombre : 'Secretaría';
+    const remitente  = auth && auth.nombre ? auth.nombre : (NOMBRE_BANDEJA[bandeja] || 'Secretaría');
     const asunto     = '[PQRS Goyavier] Observación del solicitante — Solicitud ' + id + ' — ' + dep;
     const cuerpo     =
       'Hola, equipo de ' + dep + '.\n\n' +
-      'Les informamos que el padre de familia ha registrado una observación o inconformidad\n' +
+      'Les informamos que el solicitante ha registrado una observación o inconformidad\n' +
       'con respecto a la respuesta anterior sobre este caso.\n' +
       'Esta comunicación fue revisada por ' + remitente + ' y se les envía para su atención oportuna.\n\n' +
       '══════════════════════════════════════════\n' +
@@ -1436,8 +1874,9 @@ function enviarObsArea_(p, auth) {
       '  Fecha de creación: ' + fechaCreacion + '\n' +
       '  Dependencia      : ' + dep + '\n' +
       '  Solicitante      : ' + nombreSol + (correoSol ? ' <' + correoSol + '>' : '') + '\n' +
-      '  Estudiante       : ' + estudiante + '\n' +
-      '  Grado            : ' + grado + '\n\n' +
+      '  Tipo de solicitante: ' + (get('TipoSolicitante') || '-') + '\n' +
+      (estudiante ? '  Estudiante       : ' + estudiante + '\n' : '') +
+      (grado ? '  Grado            : ' + grado + '\n' : '') + '\n' +
       '══════════════════════════════════════════\n' +
       'DESCRIPCIÓN ORIGINAL DEL PQRS\n' +
       '══════════════════════════════════════════\n' +
@@ -1453,11 +1892,11 @@ function enviarObsArea_(p, auth) {
       'Por favor registren su respuesta a esta observación haciendo clic en el siguiente enlace:\n\n' +
       enlaceRespuesta + '\n\n' +
       '══════════════════════════════════════════\n' +
-      'Importante: Su respuesta llegará primero al sistema. Secretaría o Rectoría la\n' +
-      'revisarán antes de comunicarla oficialmente al solicitante.\n\n' +
+      'Importante: Su respuesta llegará primero al sistema. El equipo de PQRS la\n' +
+      'revisará antes de comunicarla oficialmente al solicitante.\n\n' +
       'Con atención y agradecimiento,\n' + remitente + '\nColegio Goyavier Campestre · Sistema PQRS';
 
-    const opts = {name: 'PQRS Colegio Goyavier', replyTo: EMAIL_RESP};
+    const opts = {name: 'PQRS Colegio Goyavier', replyTo: correoDeBandeja_(bandeja)};
     var viaEnvio = 'gmailapp';
     if (googleToken) {
       try {
@@ -1485,55 +1924,28 @@ function jsonOut(data) {
   return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
 }
 
-function getHeaders() {
-  return ['ID','Fecha','Dependencia','Nombre',
-    'Telefono','Correo','Estudiante','Grado','TipoSolicitud','MedioRecepcion',
-    'RequiereRespuesta','Descripcion','Estado','EmailPendiente','CreadoEn','OrigenForms',
-    'ObservacionSolicitante','FechaObservacion','FormsKey','Calificacion'];
-}
-
-function ensureHeaders(sheet) {
-  const headers = getHeaders();
-  if (sheet.getLastRow() === 0) {
-    sheet.appendRow(headers);
-    sheet.getRange(1, 1, 1, headers.length).setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
-    return;
-  }
-  // Solo actualiza columnas estándar — NO borra columnas dinámicas extra (p.ej. TokenRespuesta)
-  sheet.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
-}
-
-function generarId(sheet) {
-  const existingIds = new Set();
-  if (sheet.getLastRow() > 1) {
-    sheet.getRange(2, 1, sheet.getLastRow() - 1, 1).getValues().flat()
-      .forEach(id => { if (id) existingIds.add(String(id).trim()); });
-  }
-  let maxNum = 0;
-  existingIds.forEach(id => {
-    const n = parseInt(String(id).replace('PQRS2260', '')) || 0;
-    if (n > maxNum) maxNum = n;
-  });
-  let candidate;
-  do {
-    maxNum++;
-    candidate = 'PQRS2260' + String(maxNum).padStart(4, '0');
-  } while (existingIds.has(candidate));
-  return candidate;
-}
-
 // ============================================================
-// Ejecutar UNA SOLA VEZ desde el editor de Apps Script:
-//   Funciones > inicializarSistema > Ejecutar
-// Crea y configura todas las hojas necesarias con valores por defecto.
-// ============================================================
-// ============================================================
-// Ejecutar UNA SOLA VEZ desde el editor de Apps Script:
+// Ejecutar UNA SOLA VEZ en una instalación NUEVA desde el editor de Apps Script:
 //   Funciones → inicializarSistema → Ejecutar
-// Crea y configura todas las hojas necesarias.
+// Crea las hojas con sus valores por defecto. No toca nada que ya exista (ni la
+// configuración ni los usuarios): para actualizar un sistema que ya funciona use
+// actualizarEstructura().
 // ============================================================
 function inicializarSistema() {
+  actualizarEstructura();
+}
+
+// ============================================================
+// Ejecutar UNA VEZ después de pegar esta versión del código (también sirve en instalaciones nuevas):
+//   Funciones → actualizarEstructura → Ejecutar
+//  · Agrega a la hoja PQRS las columnas nuevas (TipoSolicitante, etc.) SIN mover ni borrar las que ya hay.
+//  · Agrega la columna «Perfil» a UsuariosPQRS y lista los usuarios que todavía no tienen perfil.
+//  · Agrega a Configuracion los correos por perfil (emailPerfiles) y copiarRectoria si no existían.
+// Es seguro repetirla: solo agrega lo que falta.
+// ============================================================
+function actualizarEstructura() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const avisos = [];
 
   // Hoja PQRS
   let pqrsSheet = ss.getSheetByName(SHEET_NAME);
@@ -1542,21 +1954,17 @@ function inicializarSistema() {
 
   // Hoja Seguimientos
   let segSheet = ss.getSheetByName(SEG_SHEET);
-  if (!segSheet) {
-    segSheet = ss.insertSheet(SEG_SHEET);
-    const segHeaders = ['PQRS_ID','Fecha','Respuesta','Estado','RegistradoEn','Tipo','Autor','SegKey'];
-    segSheet.appendRow(segHeaders);
-    segSheet.getRange(1, 1, 1, segHeaders.length).setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
-  }
+  if (!segSheet) segSheet = ss.insertSheet(SEG_SHEET);
+  ensureSegHeaders_(segSheet);
 
-  // Hoja Configuracion con valores por defecto
+  // Hoja Configuracion: solo se siembra lo que falta (antes se borraba todo al volver a ejecutar)
   let cfgSheet = ss.getSheetByName(CFG_SHEET);
   if (!cfgSheet) {
     cfgSheet = ss.insertSheet(CFG_SHEET);
     cfgSheet.appendRow(['Clave', 'Valor']);
-    cfgSheet.getRange(1, 1, 1, 2).setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
+    estiloEncabezado_(cfgSheet.getRange(1, 1, 1, 2));
   }
-  if (cfgSheet.getLastRow() > 1) cfgSheet.getRange(2, 1, cfgSheet.getLastRow() - 1, 2).clearContent();
+  const cfgActual = readConfigObject_();
   const configDefecto = {
     diasRespuesta: 15,
     alertaDias: 2,
@@ -1565,27 +1973,44 @@ function inicializarSistema() {
       'Coord. Preescolar','Coord. Academica','Bachillerato','Mantenimiento',
       'Servicio de restaurante','Coord. Primaria','Coord. Convivencia',
       'Secretaria','Servicios Varios','Biblioteca','Sistemas','Enfermeria'
-    ]
+    ],
+    // Correos que reciben los avisos de cada bandeja (se pueden cambiar en Configuración). Vacío = EMAIL_RESP.
+    // copiarRectoria: Rectoría recibe copia solo cuando llega una solicitud NUEVA.
+    emailPerfiles: { secretaria: EMAIL_RESP, talentoHumano: 'talentohumano@colegiogoyavier.edu.co', rectoria: 'rectoria@colegiogoyavier.edu.co' },
+    copiarRectoria: true
   };
-  Object.entries(configDefecto).forEach(([k, v], i) => {
-    cfgSheet.getRange(i + 2, 1, 1, 2).setValues([[k, JSON.stringify(v)]]);
+  Object.keys(configDefecto).forEach(function(k) {
+    if (cfgActual[k] === undefined) {
+      cfgSheet.appendRow([k, JSON.stringify(configDefecto[k])]);
+      avisos.push('Configuracion: se agregó «' + k + '».');
+    }
   });
 
-  // Hoja UsuariosPQRS — usuarios autorizados para acceder al sistema via Google
-  // Agrega los 3 usuarios por defecto si no existen aún.
+  // Hoja UsuariosPQRS — usuarios autorizados y su perfil
   let usuSheet = ss.getSheetByName(USUARIOS_SHEET);
   if (!usuSheet) {
     usuSheet = ss.insertSheet(USUARIOS_SHEET);
-    const usuHeaders = ['Email', 'Nombre', 'Estado', 'Clave'];
-    usuSheet.appendRow(usuHeaders);
-    usuSheet.getRange(1, 1, 1, usuHeaders.length).setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
+    usuSheet.appendRow(['Email', 'Nombre', 'Estado', 'Clave', 'Perfil']);
+    estiloEncabezado_(usuSheet.getRange(1, 1, 1, 5));
   }
-  // Agregar columna Clave si la hoja ya existía sin ella
-  const hdrs = usuSheet.getRange(1, 1, 1, usuSheet.getLastColumn()).getValues()[0];
-  if (hdrs.indexOf('Clave') < 0) {
-    usuSheet.getRange(1, usuSheet.getLastColumn() + 1).setValue('Clave').setFontWeight('bold').setBackground('#1575bc').setFontColor('#ffffff');
-  }
+  const uh = usuSheet.getRange(1, 1, 1, usuSheet.getLastColumn()).getValues()[0].map(function(h) { return String(h).trim(); });
+  ['Clave', 'Perfil'].forEach(function(col) {
+    if (uh.indexOf(col) < 0) {
+      estiloEncabezado_(usuSheet.getRange(1, uh.length + 1).setValue(col));
+      uh.push(col);
+      avisos.push('UsuariosPQRS: se agregó la columna «' + col + '».');
+    }
+  });
   // Los usuarios y claves se gestionan directamente en la hoja UsuariosPQRS — no se insertan desde el código.
+  if (usuSheet.getLastRow() >= 2) {
+    const iE = uh.indexOf('Email'), iP = uh.indexOf('Perfil');
+    const sinPerfil = usuSheet.getRange(2, 1, usuSheet.getLastRow() - 1, uh.length).getValues()
+      .filter(function(r) { return String(r[iE] || '').trim() && !normPerfil_(r[iP]); })
+      .map(function(r) { return String(r[iE]).trim(); });
+    if (sinPerfil.length) avisos.push('FALTA asignar «Perfil» (Secretaria, Talento Humano o Rectoria) a: ' + sinPerfil.join(', ') +
+      '. Mientras no lo tengan NO podrán iniciar sesión.');
+  }
 
-  Logger.log('✓ Sistema PQRS inicializado correctamente. Revise la hoja UsuariosPQRS para gestionar usuarios y claves.');
+  Logger.log('✓ Estructura PQRS actualizada.\n' + (avisos.length ? avisos.join('\n') : 'No había nada pendiente.') +
+    '\nRecuerde: en el Google Form debe existir la pregunta «¿Cuál es tu relación con el colegio?».');
 }
