@@ -403,5 +403,63 @@ const snapshot = (sh, id) => JSON.stringify(sh.rowById(id));
   const enlaceRes = env2.run('doGet(__v)', { parameter: { action: 'ping' } }); assert.equal(env2.json(enlaceRes), 'ok');
   ok('los enlaces con parámetros (solicitante/área/API) no se ven afectados');
 
+  // ============ 12. Hoja de respuestas reordenada (la que tiene hoy la base real) ============
+  console.log('\n[12] Hoja de respuestas con otro orden de columnas + solicitudes antiguas con la relación rellenada a mano');
+  const HDR_REAL = ['Marca temporal', '¿Cuál es tu relación con el colegio?', 'Correo electrónico donde recibirás respuesta y seguimiento de tu PQRS.  ', 'Teléfono  ',
+    'Nombre del estudiante', 'Tipo de solicitud  ', 'Requiere respuesta', 'Descripción de la solicitud  ', 'Grado', 'Nombre ', 'Revisado', 'FormsID'];
+  const e12 = crearEntorno(); sembrar(e12);
+  const P12 = e12.sheet('PQRS'), F12 = new Sheet('Respuestas de formulario 1'); e12.sheets['Respuestas de formulario 1'] = F12;
+  F12.appendRow(HDR_REAL);
+  const filaF = (fid, rel) => { const o = HDR_REAL.map(() => ''); o[0] = '2026-10-01T15:00:00.000Z'; o[1] = rel; o[10] = true; o[11] = fid; return o; };
+  F12.appendRow(filaF('fk-PQRS22600001', 'Padre de familia'));
+  F12.appendRow(filaF('fk-PQRS22600002', 'Padre de familia'));
+  F12.appendRow(filaF('fk-PQRS22600005', 'Colaborador'));
+  F12.appendRow(filaF('fk-PQRS22600006', 'Colaborador'));
+  e12.call('ensureHeaders', P12);                                   // la columna TipoSolicitante existe (vacía) antes de completarla
+  const tipoDe = id => P12.rowById(id)[P12.col('TipoSolicitante')] ?? '';
+  P12.rowById('PQRS22600002')[P12.col('TipoSolicitante')] = 'Estudiante';   // ya tenía tipo: la hoja de respuestas NO debe pisarlo
+  e12.call('actualizarEstructura');
+  assert.equal(tipoDe('PQRS22600001'), 'Padre de familia'); assert.equal(tipoDe('PQRS22600005'), 'Colaborador'); assert.equal(tipoDe('PQRS22600006'), 'Colaborador');
+  assert.equal(tipoDe('PQRS22600002'), 'Estudiante'); assert.equal(tipoDe('PQRS22600003'), '');
+  assert.ok(e12.logs.join('\n').includes('se completó «TipoSolicitante» en 3 solicitud'));
+  ok('las solicitudes antiguas toman el tipo de la columna «¿Cuál es tu relación…?» de la hoja de respuestas (por FormsID, esté donde esté la columna)');
+  ok('lo que ya tenía tipo no se pisa, y las que no están en la hoja de respuestas quedan como estaban');
+  const copia12 = JSON.stringify(P12.rows); e12.call('actualizarEstructura'); assert.equal(JSON.stringify(P12.rows), copia12); ok('repetir actualizarEstructura no cambia nada más');
+
+  const U12 = e12.sheet('UsuariosPQRS'), iPerf12 = U12.col('Perfil');
+  U12.rows[3][iPerf12] = 'Rectoria';
+  U12.appendRow(['th@colegio.edu.co', 'Talento Humano', 'ACTIVO', 'k-th', 'Talento Humano']);
+  const tTh12 = e12.login('th@colegio.edu.co', 'k-th').token, tRect12 = e12.login('rectoria', 'k-rect').token;
+  const dTh12 = e12.get({ action: 'getData', token: tTh12 });
+  assert.equal(ids(dTh12), '05,06'); assert.equal(dTh12.find(r => r.ID.endsWith('06')).Grado, '');
+  ok('Talento Humano ve las antiguas de colaboradores (05, 06) y la marca «Colaborador» ya no se muestra como grado');
+
+  const T12 = { rel: HDR_REAL[1], correo: HDR_REAL[2], tel: HDR_REAL[3], est: HDR_REAL[4], tipo: HDR_REAL[5], req: HDR_REAL[6], desc: HDR_REAL[7], grado: HDR_REAL[8], nombre: HDR_REAL[9] };
+  function enviar12(rel, nombre, estudiante, grado) {
+    const resp = { [T12.rel]: rel, [T12.nombre]: nombre, [T12.correo]: 'x@mail.com', [T12.tel]: '3100000000', [T12.est]: estudiante, [T12.tipo]: 'Queja', [T12.req]: 'SI', [T12.desc]: 'Texto', [T12.grado]: grado };
+    const fila = HDR_REAL.map((h, i) => i === 0 ? '2026-11-20T15:00:00.000Z' : (resp[h] ?? ''));
+    const nv = {}; Object.entries(resp).forEach(([k, v]) => { if (v !== '') nv[k] = [v]; });       // Forms no manda lo que no se contestó
+    F12.appendRow(fila); e12.outbox.length = 0;
+    e12.ctx.__e = { namedValues: nv, values: fila, range: { getRow: () => F12.getLastRow() } };
+    e12.run('onFormSubmit(__e)');
+    return P12.rows[P12.rows.length - 1];
+  }
+  const g12 = (f, h) => f[P12.col(h)];
+  let f12 = enviar12('Colaborador', 'Luis Colab', '', '');
+  assert.equal(g12(f12, 'Nombre'), 'Luis Colab'); assert.equal(g12(f12, 'Correo'), 'x@mail.com'); assert.equal(g12(f12, 'Telefono'), 3100000000);
+  assert.equal(g12(f12, 'TipoSolicitante'), 'Colaborador'); assert.equal(g12(f12, 'Estudiante'), ''); assert.equal(g12(f12, 'Grado'), '');
+  assert.equal(e12.outbox[0].to, 'talentohumano@colegiogoyavier.edu.co,rectoria@colegiogoyavier.edu.co');
+  ok('envío de colaborador con la hoja reordenada («Nombre » en la columna 10, títulos con espacios al final): campos en su sitio y aviso a Talento Humano + Rectoría');
+  f12 = enviar12('Padre de familia', 'Carlos', 'Hijo Uno', 'Tercero A');
+  assert.equal(g12(f12, 'Nombre'), 'Carlos'); assert.equal(g12(f12, 'Estudiante'), 'Hijo Uno'); assert.equal(g12(f12, 'Grado'), 'Tercero A'); assert.equal(g12(f12, 'TipoSolicitante'), 'Padre de familia');
+  ok('envío de padre de familia con la hoja reordenada: estudiante y grado en su sitio');
+  // Respuesta que el disparador no alcanzó a procesar: la importa getData leyendo por título
+  const sinDisparador = HDR_REAL.map(() => ''); sinDisparador[0] = '2026-11-21T10:00:00.000Z'; sinDisparador[1] = 'Visitante'; sinDisparador[2] = 'v@mail.com';
+  sinDisparador[3] = '3111111111'; sinDisparador[5] = 'Sugerencia'; sinDisparador[6] = 'NO'; sinDisparador[7] = 'Texto sin disparador'; sinDisparador[9] = 'Vera';
+  F12.appendRow(sinDisparador);
+  const imp12 = e12.get({ action: 'getData', token: tRect12 }).find(r => r.Descripcion === 'Texto sin disparador');
+  assert.ok(imp12); assert.equal(imp12.Nombre, 'Vera'); assert.equal(imp12.Correo, 'v@mail.com'); assert.equal(imp12.TipoSolicitante, 'Visitante'); assert.equal(imp12.Bandeja, 'talento');
+  ok('una respuesta sin procesar por el disparador se importa leyendo por título y cae en la bandeja de Talento Humano');
+
   console.log('\nTODAS LAS PRUEBAS PASARON (' + n + ' comprobaciones)');
 })();

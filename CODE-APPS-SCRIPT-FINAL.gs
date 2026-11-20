@@ -118,10 +118,12 @@ function normalizarSolicitante_(tipoRaw, estudiante, grado) {
   let tipo = normTipoSolicitante_(tipoRaw);
   let gr   = String(grado == null ? '' : grado).trim();
   const est = String(estudiante == null ? '' : estudiante).trim();
+  const gradoEsMarcaVieja = normKey_(gr) === 'colaborador';          // «Colaborador» nunca es un grado
   if (!tipo) {
-    if (normKey_(gr) === 'colaborador') { tipo = 'Colaborador'; gr = ''; }
+    if (gradoEsMarcaVieja) tipo = 'Colaborador';
     else tipo = String(tipoRaw == null ? '' : tipoRaw).trim();      // valor no reconocido: se conserva tal cual
   }
+  if (gradoEsMarcaVieja) gr = '';                                    // también cuando el tipo ya se completó desde la hoja de respuestas
   return { tipo: tipo, estudiante: est, grado: gr };
 }
 
@@ -1935,12 +1937,53 @@ function inicializarSistema() {
   actualizarEstructura();
 }
 
+// Solicitudes ya importadas antes del cambio no tienen TipoSolicitante, pero la hoja de respuestas del formulario
+// sí puede traer la columna «¿Cuál es tu relación con el colegio?» llena (p. ej. rellenada a mano en las respuestas
+// antiguas). Se copia SOLO a las filas de PQRS que tienen el tipo vacío, enlazando por FormsID (FormsKey) y
+// siempre por NOMBRE de columna: da igual en qué posición esté la columna. Devuelve las solicitudes completadas.
+function completarTipoDesdeForms_(ss) {
+  const pqrs = ss.getSheetByName(SHEET_NAME), forms = ss.getSheetByName(FORMS_SHEET);
+  if (!pqrs || !forms || pqrs.getLastRow() < 2 || forms.getLastRow() < 2) return [];
+  const fd = forms.getDataRange().getValues();
+  const fh = fd[0];
+  const iRel = fh.findIndex(function(h) {
+    const n = normKey_(h);
+    return CAMPOS_TIPO_SOLICITANTE.some(function(c) { return normKey_(c) === n; }) ||
+           CLAVES_PARCIALES_SOLICITANTE.some(function(p) { return n.indexOf(p) >= 0; });
+  });
+  if (iRel < 0) return [];
+  const iFid = fh.indexOf('FormsID');
+  const tipoPorClave = {};
+  fd.slice(1).forEach(function(r) {
+    const tipo = normTipoSolicitante_(r[iRel]);
+    if (!tipo) return;
+    const clave = (iFid >= 0 && String(r[iFid] || '').trim()) ? String(r[iFid]).trim() : normalizeTimestamp_(r[0]);
+    if (clave) tipoPorClave[clave] = tipo;
+  });
+  const hechas = [];
+  conBloqueo_(function() {
+    const pd = pqrs.getDataRange().getValues();
+    const ph = pd[0].map(function(h) { return String(h).trim(); });
+    const iT = ph.indexOf('TipoSolicitante'), iK = ph.indexOf('FormsKey'), iId = ph.indexOf('ID');
+    if (iT < 0 || iK < 0) return;
+    for (let i = 1; i < pd.length; i++) {
+      if (String(pd[i][iT] || '').trim()) continue;                 // ya tiene tipo: no se toca
+      const tipo = tipoPorClave[String(pd[i][iK] || '').trim()];
+      if (!tipo) continue;
+      pqrs.getRange(i + 1, iT + 1).setValue(tipo);
+      hechas.push(String(pd[i][iId]).trim() + ' (' + tipo + ')');
+    }
+  });
+  return hechas;
+}
+
 // ============================================================
 // Ejecutar UNA VEZ después de pegar esta versión del código (también sirve en instalaciones nuevas):
 //   Funciones → actualizarEstructura → Ejecutar
 //  · Agrega a la hoja PQRS las columnas nuevas (TipoSolicitante, etc.) SIN mover ni borrar las que ya hay.
 //  · Agrega la columna «Perfil» a UsuariosPQRS y lista los usuarios que todavía no tienen perfil.
 //  · Agrega a Configuracion los correos por perfil (emailPerfiles) y copiarRectoria si no existían.
+//  · Completa el tipo de solicitante de las solicitudes antiguas que no lo tienen, a partir de la hoja de respuestas.
 // Es seguro repetirla: solo agrega lo que falta.
 // ============================================================
 function actualizarEstructura() {
@@ -2010,6 +2053,10 @@ function actualizarEstructura() {
     if (sinPerfil.length) avisos.push('FALTA asignar «Perfil» (Secretaria, Talento Humano o Rectoria) a: ' + sinPerfil.join(', ') +
       '. Mientras no lo tengan NO podrán iniciar sesión.');
   }
+
+  // Solicitudes antiguas sin tipo: se completa con la columna de relación de la hoja de respuestas (si la tienen llena)
+  const completadas = completarTipoDesdeForms_(ss);
+  if (completadas.length) avisos.push('PQRS: se completó «TipoSolicitante» en ' + completadas.length + ' solicitud(es) antigua(s) desde la hoja de respuestas: ' + completadas.join(', ') + '.');
 
   Logger.log('✓ Estructura PQRS actualizada.\n' + (avisos.length ? avisos.join('\n') : 'No había nada pendiente.') +
     '\nRecuerde: en el Google Form debe existir la pregunta «¿Cuál es tu relación con el colegio?».');
