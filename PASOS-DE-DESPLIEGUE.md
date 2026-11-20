@@ -10,7 +10,7 @@ hoy eligen «Colaborador» como grado se reconocen solos), así que se puede cam
    - Reemplace el contenido de `CODE-APPS-SCRIPT-FINAL.gs` por el nuevo.
    - Reemplace el archivo `PQRS-FINAL` (HTML) por el nuevo `PQRS-FINAL.html` (si la pantalla se sigue sirviendo desde Apps Script).
 3. Ejecute **`actualizarEstructura()`** (Apps Script → seleccionar la función → Ejecutar → autorizar). Es seguro repetirla.
-   Agrega las columnas nuevas **al final** (no mueve ni borra nada) y escribe en el registro quiénes aún no tienen perfil.
+   Agrega las columnas nuevas **al final** (no mueve ni borra nada) y escribe en el registro quiénes aún no tienen perfil. También completa el tipo de solicitante de las solicitudes antiguas con la columna «¿Cuál es tu relación con el colegio?» de la hoja de respuestas (si la tienen llena; solo donde el tipo estaba vacío). Esa columna puede estar en cualquier posición de la hoja de respuestas: el sistema lee por título, no por posición.
 4. En la hoja **UsuariosPQRS**, columna **Perfil** (valores exactos):
 
    | Usuario | Perfil | Qué ve |
